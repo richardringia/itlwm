@@ -3711,6 +3711,7 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
         .sta_id = IWX_STATION_ID,
         .tid = (uint8_t)tid,
     };
+    struct iwx_scd_queue_cfg_cmd cmd_v3;
     struct iwx_rx_packet *pkt;
     struct iwx_tx_queue_cfg_rsp *resp;
     struct iwx_host_cmd hcmd = {
@@ -3785,6 +3786,19 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
 
     hcmd.data[0] = &cmd;
     hcmd.len[0] = sizeof(cmd);
+    if (iwx_has_new_station_api(sc)) {
+        /* SCD_QUEUE_CONFIG_CMD v3 (DATA_PATH_GROUP), Linux iwl_txq_dyn_alloc */
+        memset(&cmd_v3, 0, sizeof(cmd_v3));
+        cmd_v3.operation = htole32(IWX_SCD_QUEUE_ADD);
+        cmd_v3.u.add.sta_mask = htole32(1U << IWX_STATION_ID);
+        cmd_v3.u.add.tid = (uint8_t)tid;
+        cmd_v3.u.add.cb_size = cmd.cb_size;
+        cmd_v3.u.add.bc_dram_addr = cmd.byte_cnt_addr;
+        cmd_v3.u.add.tfdq_dram_addr = cmd.tfdq_addr;
+        hcmd.id = iwx_cmd_id(IWX_SCD_QUEUE_CONFIG_CMD, IWX_DATA_PATH_GROUP, 0);
+        hcmd.data[0] = &cmd_v3;
+        hcmd.len[0] = sizeof(cmd_v3);
+    }
 
 #ifdef AIRPORT_VTD
     submitted = true;
@@ -3822,11 +3836,16 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
         goto fail;
     }
 #ifdef AIRPORT_VTD
-    if (fwqid <= IWX_QID_MGMT || sc->txq[fwqid].queued || wr_idx >= getTxQueueSize()) {
+    /* MLD firmware also hands out low queue numbers (only 0 = cmd is reserved) */
+    if ((iwx_has_new_station_api(sc) ? fwqid == IWX_DQA_CMD_QUEUE : fwqid <= IWX_QID_MGMT) ||
+        sc->txq[fwqid].queued || wr_idx >= getTxQueueSize()) {
+        XYLog("SCD_QUEUE_CFG: rejecting fw queue %d (queued %d, wr %u)\n",
+              fwqid, sc->txq[fwqid].queued, wr_idx);
         err = -EIO;
         goto fail;
     }
 #endif
+    XYLog("SCD_QUEUE_CFG tid=%d -> fw queue %d wr=%u size=%d\n", tid, fwqid, wr_idx, ring->ring_count);
     ring->cur = wr_idx;
     ring->tail = IWX_AGG_SSN_TO_TXQ_IDX(wr_idx, ring->ring_count);
     ring->qid = fwqid;
@@ -3966,6 +3985,12 @@ iwx_schedule_protect_session(struct iwx_softc *sc, struct iwx_node *in,
     int err;
     
     cmd.conf_id = IWX_SESSION_PROTECT_CONF_ASSOC;
+    if (iwx_has_new_station_api(sc)) {
+        /* v2: id is the FW link id; Linux iwl_mvm_protect_assoc uses 900 ms */
+        cmd.id_and_color = htole32(0);
+        cmd.duration_tu = htole32(900 * 1000 / 1024);
+        XYLog("MLD SESSION_PROTECTION add link 0, %u TU\n", le32toh(cmd.duration_tu));
+    }
     
     DPRINTFN(1, ("Add new session protection, duration %d TU\n",
              htole32(cmd.duration_tu)));
@@ -3986,6 +4011,9 @@ iwx_cancel_session_protection(struct iwx_softc *sc, struct iwx_node *in)
         .conf_id = IWX_SESSION_PROTECT_CONF_ASSOC,
     };
     int err;
+    
+    if (iwx_has_new_station_api(sc))
+        cmd.id_and_color = htole32(0);
     
     DPRINTFN(1, ("Remove session protection\n"));
     
@@ -4403,7 +4431,7 @@ iwx_setup_he_rates(struct iwx_softc *sc)
     if (!sc->sc_nvm.sku_cap_11ax_enable ||
         !(ic->ic_userflags & IEEE80211_F_HEON) ||
         (ic->ic_userflags & IEEE80211_F_NOVHT) ||
-        (version != 1 && version != 2))
+        (!iwx_has_new_station_api(sc) && version != 1 && version != 2))
         return;
     unsigned rx = iwx_num_of_ant(iwx_fw_valid_rx_ant(sc));
     unsigned tx = iwx_num_of_ant(iwx_fw_valid_tx_ant(sc));
@@ -4810,7 +4838,7 @@ iwx_ampdu_rx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
     ItlIwx *that = container_of(sc, ItlIwx, com);
     
     if (sc->sc_rx_ba_sessions >= IWX_MAX_RX_BA_SESSIONS ||
-        tid >= IWX_MAX_TID_COUNT)
+        tid >= IWX_MAX_TID_COUNT || that->iwx_has_new_station_api(sc))
         return ENOSPC;
     
     if (ic->ic_state != IEEE80211_S_RUN)
@@ -4855,7 +4883,7 @@ iwx_ampdu_tx_start(struct ieee80211com *ic, struct ieee80211_node *ni, uint8_t t
 
     XYLog("%s tid=%d ssn=%d\n", __FUNCTION__, tid, ba->ba_winstart);
 
-    if (tid < 0 || tid >= IWX_MAX_TID_COUNT) {
+    if (tid < 0 || tid >= IWX_MAX_TID_COUNT || that->iwx_has_new_station_api(sc)) {
         XYLog("%s tx agg refused. tid=%d\n", __FUNCTION__, tid);
         return ENOSPC;
     }
@@ -6432,6 +6460,8 @@ iwx_binding_cmd(struct iwx_softc *sc, struct iwx_node *in, uint32_t action)
     int i, err, active = (sc->sc_flags & IWX_FLAG_BINDING_ACTIVE);
     uint32_t status;
     
+    if (iwx_has_new_station_api(sc))
+        return 0;   /* MLD: LINK_CONFIG binds MAC and PHY */
     if (action == IWX_FW_CTXT_ACTION_ADD && active) {
         XYLog("binding already added\n");
         return 0;
@@ -7443,7 +7473,7 @@ iwx_flush_sta_tids(struct iwx_softc *sc, int sta_id, uint16_t tids)
         if (qid >= nitems(sc->txq))
             continue;
 
-        if (sc->sc_tid_data[tid].qid != qid)
+        if (tid >= nitems(sc->sc_tid_data) || sc->sc_tid_data[tid].qid != qid)
             continue;
         txq = &sc->txq[qid];
         
@@ -7491,6 +7521,9 @@ iwx_drain_sta(struct iwx_softc *sc, struct iwx_node* in, int drain)
     struct iwx_add_sta_cmd cmd;
     int err;
     uint32_t status;
+    
+    if (iwx_has_new_station_api(sc))
+        return 0;
     
     memset(&cmd, 0, sizeof(cmd));
     cmd.mac_id_n_color = htole32(IWX_FW_CMD_ID_AND_COLOR(in->in_id,
@@ -7666,6 +7699,8 @@ iwx_add_sta_cmd(struct iwx_softc *sc, struct iwx_node *in, int update)
         XYLog("STA already added\n");
         return 0;
     }
+    if (iwx_has_new_station_api(sc) && ic->ic_opmode == IEEE80211_M_STA)
+        return iwx_mld_sta_cmd(sc, in);
     
     memset(&add_sta_cmd, 0, sizeof(add_sta_cmd));
     
@@ -7822,6 +7857,8 @@ iwx_rm_sta_cmd(struct iwx_softc *sc, struct iwx_node *in)
         XYLog("sta already removed\n");
         return 0;
     }
+    if (iwx_has_new_station_api(sc) && ic->ic_opmode == IEEE80211_M_STA)
+        return iwx_mld_rm_sta_cmd(sc);
     
     memset(&rm_sta_cmd, 0, sizeof(rm_sta_cmd));
     if (ic->ic_opmode == IEEE80211_M_MONITOR)
@@ -9019,6 +9056,8 @@ iwx_mac_ctxt_cmd(struct iwx_softc *sc, struct iwx_node *in, uint32_t action,
         XYLog("MAC already removed\n");
         return 0;
     }
+    if (iwx_has_new_station_api(sc) && ic->ic_opmode == IEEE80211_M_STA)
+        return iwx_mld_mac_cmd(sc, in, action, assoc && ni->ni_associd);
     
     memset(&cmd, 0, sizeof(cmd));
     
@@ -9259,6 +9298,18 @@ iwx_enable_mgmt_queue(struct iwx_softc *sc)
     int err;
     int cmdver;
 
+    if (iwx_has_new_station_api(sc)) {
+        /* MLD: firmware picks the queue (Linux iwl_mvm_tvqm_enable_txq, tid 15) */
+        int qid = iwx_tvqm_enable_txq(sc, IWX_MGMT_TID, 0, IWX_DEFAULT_QUEUE_SIZE);
+        if (qid < 0) {
+            XYLog("%s: could not enable MGMT Tx queue (error %d)\n", DEVNAME(sc), qid);
+            return -qid;
+        }
+        sc->first_data_qid = qid;
+        sc->sc_mld_mgmt_qid = qid;
+        XYLog("MLD mgmt queue = %d\n", qid);
+        return 0;
+    }
     cmdver = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_ADD_STA);
     if (cmdver != IWX_FW_CMD_VER_UNKNOWN && cmdver >= 12)
         sc->first_data_qid = IWX_QID_MGMT - 1;
@@ -9559,6 +9610,8 @@ iwx_config_he_sta(struct iwx_softc *sc, struct ieee80211_node *ni)
     if ((ni->ni_flags & (IEEE80211_NODE_HECAP | IEEE80211_NODE_HEOP)) !=
         (IEEE80211_NODE_HECAP | IEEE80211_NODE_HEOP))
         return EINVAL;
+    if (iwx_has_new_station_api(sc))
+        return 0;   /* MLD: no STA_HE_CTXT; HE goes in LINK_CONFIG/STA_CONFIG */
     struct iwx_he_sta_context_cmd cmd;
     static_assert(sizeof(cmd) == 88, "HE context v2 ABI");
     static_assert(__offsetof(struct iwx_he_sta_context_cmd, max_bssid_indicator) == 80, "HE context v1 ABI");
@@ -9873,6 +9926,294 @@ iwx_phy_ctxt_update(struct iwx_softc *sc, struct iwx_phy_ctxt *phyctxt,
     return 0;
 }
 
+/*
+ * MLD command API (Bz / BE200, -92 firmware). The firmware has no ADD_STA,
+ * MAC_CONTEXT, BINDING or legacy SCD_QUEUE_CFG; this is the single-link,
+ * non-MLO subset of Linux mvm mld-mac.c / link.c / mld-sta.c / mld-key.c.
+ * Fixed ids: MAC 0, link 0, AP station 0 (IWX_STATION_ID).
+ */
+#define IWX_MLD_MAC_ID      0
+#define IWX_MLD_LINK_ID     0
+#define IWX_MLD_STA_MASK    (1U << IWX_STATION_ID)
+
+int ItlIwx::
+iwx_mld_link_cmd(struct iwx_softc *sc, struct iwx_node *in, uint32_t action,
+                 uint32_t modify_mask, uint32_t active)
+{
+#define IWX_EXP2(x)    ((1 << (x)) - 1)
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct ieee80211_node *ni = &in->in_ni;
+    struct iwx_link_config_cmd cmd;
+    int cck_ack_rates, ofdm_ack_rates, i, err;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.action = htole32(action);
+    cmd.link_id = htole32(IWX_MLD_LINK_ID);
+    cmd.mac_id = htole32(IWX_MLD_MAC_ID);
+    cmd.phy_id = htole32(in->in_phyctxt && action != IWX_FW_CTXT_ACTION_REMOVE ?
+                         in->in_phyctxt->id : IWX_FW_CTXT_INVALID);
+    cmd.spec_link_id = 0;
+    if (action != IWX_FW_CTXT_ACTION_REMOVE) {
+        IEEE80211_ADDR_COPY(cmd.local_link_addr, ic->ic_myaddr);
+        cmd.modify_mask = htole32(modify_mask);
+        cmd.active = htole32(active);
+
+        iwx_ack_rates(sc, in, &cck_ack_rates, &ofdm_ack_rates);
+        cmd.cck_rates = htole32(cck_ack_rates);
+        cmd.ofdm_rates = htole32(ofdm_ack_rates);
+        cmd.cck_short_preamble = htole32((ic->ic_flags & IEEE80211_F_SHPREAMBLE) ? 1 : 0);
+        cmd.short_slot = htole32((ic->ic_flags & IEEE80211_F_SHSLOT) ? 1 : 0);
+
+        if (ni->ni_flags & IEEE80211_NODE_HT) {
+            enum ieee80211_htprot htprot =
+                (enum ieee80211_htprot)(ni->ni_htop1 & IEEE80211_HTOP1_PROT_MASK);
+            uint32_t ht_flag = IWX_LINK_PROT_FLG_HT_PROT | IWX_LINK_PROT_FLG_FAT_PROT;
+            if (htprot == IEEE80211_HTPROT_NONMEMBER ||
+                htprot == IEEE80211_HTPROT_NONHT_MIXED ||
+                (htprot == IEEE80211_HTPROT_20MHZ && ni->ni_chw > IEEE80211_CHAN_WIDTH_20))
+                cmd.protection_flags |= htole32(ht_flag);
+            cmd.qos_flags |= htole32(IWX_MAC_QOS_FLG_TGN);
+        }
+        if (ic->ic_flags & IEEE80211_F_USEPROT)
+            cmd.protection_flags |= htole32(IWX_LINK_PROT_FLG_TGG_PROTECT);
+
+        for (i = 0; i < EDCA_NUM_AC; i++) {
+            struct ieee80211_edca_ac_params *ac = &ic->ic_edca_ac[i];
+            /* Bz tx fifos are the gen2 EDCA fifos minus the command fifo */
+            int txf = iwx_ac_to_tx_fifo[i] - 1;
+            uint8_t ucode_ac = iwx_mvm_mac80211_ac_to_ucode_ac((enum ieee80211_edca_ac)i);
+            cmd.ac[ucode_ac].cw_min = htole16(IWX_EXP2(ac->ac_ecwmin));
+            cmd.ac[ucode_ac].cw_max = htole16(IWX_EXP2(ac->ac_ecwmax));
+            cmd.ac[ucode_ac].aifsn = ac->ac_aifsn;
+            cmd.ac[ucode_ac].fifos_mask = (1 << txf);
+            cmd.ac[ucode_ac].edca_txop = htole16(ac->ac_txoplimit * 32);
+        }
+        if (ni->ni_flags & IEEE80211_NODE_QOS)
+            cmd.qos_flags |= htole32(IWX_MAC_QOS_FLG_UPDATE_EDCA);
+
+        cmd.bi = htole32(ni->ni_intval);
+        cmd.dtim_interval = htole32(ni->ni_intval * ni->ni_dtimperiod);
+
+        if ((modify_mask & IWX_LINK_CONTEXT_MODIFY_HE_PARAMS) &&
+            (ni->ni_flags & IEEE80211_NODE_HE)) {
+            struct iwx_he_sta_context_cmd he;
+            uint32_t he_flags;
+            iwx_build_he_sta(ni, &he);
+            he_flags = le32toh(he.flags);
+            cmd.htc_trig_based_pkt_ext = he.htc_trig_based_pkt_ext;
+            cmd.frame_time_rts_th = he.frame_time_rts_th;
+            cmd.bss_color = he.bss_color;
+            if (he_flags & IWX_HE_BSS_COLOR_DIS)
+                cmd.flags |= htole32(IWX_LINK_FLG_BSS_COLOR_DIS);
+            if (he_flags & IWX_HE_MU_EDCA_CW) {
+                cmd.flags |= htole32(IWX_LINK_FLG_MU_EDCA_CW);
+                memcpy(cmd.trig_based_txf, he.trig_based_txf, sizeof(cmd.trig_based_txf));
+            }
+            cmd.flags_mask = htole32(IWX_LINK_FLG_BSS_COLOR_DIS | IWX_LINK_FLG_MU_EDCA_CW);
+        } else
+            cmd.modify_mask &= ~htole32(IWX_LINK_CONTEXT_MODIFY_HE_PARAMS);
+    }
+
+    err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_LINK_CONFIG_CMD, IWX_MAC_CONF_GROUP, 0),
+                           0, sizeof(cmd), &cmd);
+    XYLog("MLD LINK_CONFIG action=%u mask=0x%x active=%u phy=%d bi=%u -> %d\n",
+          action, le32toh(cmd.modify_mask), active, (int)le32toh(cmd.phy_id),
+          ni->ni_intval, err);
+    return err;
+#undef IWX_EXP2
+}
+
+int ItlIwx::
+iwx_mld_mac_cmd(struct iwx_softc *sc, struct iwx_node *in, uint32_t action,
+                int assoc)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct ieee80211_node *ni = &in->in_ni;
+    struct iwx_mac_config_cmd cmd;
+    int err;
+
+    /* Link goes down before the MAC goes away (Linux remove_interface) */
+    if (action == IWX_FW_CTXT_ACTION_REMOVE) {
+        iwx_mld_link_cmd(sc, in, IWX_FW_CTXT_ACTION_MODIFY,
+                         IWX_LINK_CONTEXT_MODIFY_ACTIVE, 0);
+        iwx_mld_link_cmd(sc, in, IWX_FW_CTXT_ACTION_REMOVE, 0, 0);
+    }
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.id_and_color = htole32(IWX_MLD_MAC_ID);
+    cmd.action = htole32(action);
+    if (action != IWX_FW_CTXT_ACTION_REMOVE) {
+        cmd.mac_type = htole32(IWX_FW_MAC_TYPE_BSS_STA);
+        IEEE80211_ADDR_COPY(cmd.local_mld_addr, ic->ic_myaddr);
+        cmd.filter_flags = htole32(IWX_MAC_CFG_FILTER_ACCEPT_GRP |
+                                   (assoc ? 0 : IWX_MAC_CFG_FILTER_ACCEPT_BEACON));
+        if (ni->ni_flags & IEEE80211_NODE_HE) {
+            cmd.he_support = htole16(1);
+            /* we never advertise HE MAC ACK_EN (iwx_setup_he_rates) */
+            cmd.nic_not_ack_enabled = htole32(1);
+        }
+        cmd.client.is_assoc = assoc ? 1 : 0;
+        cmd.client.assoc_id = htole16(assoc ? ni->ni_associd : 0);
+    }
+    err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_MAC_CONFIG_CMD, IWX_MAC_CONF_GROUP, 0),
+                           0, sizeof(cmd), &cmd);
+    XYLog("MLD MAC_CONFIG action=%u assoc=%d aid=%u he=%u -> %d\n",
+          action, assoc, assoc ? ni->ni_associd : 0, le16toh(cmd.he_support), err);
+    if (err)
+        return err;
+
+    if (action == IWX_FW_CTXT_ACTION_ADD) {
+        /* Linux: link added with the interface, then bound to the PHY, then activated */
+        err = iwx_mld_link_cmd(sc, in, IWX_FW_CTXT_ACTION_ADD, 0, 0);
+        if (!err)
+            err = iwx_mld_link_cmd(sc, in, IWX_FW_CTXT_ACTION_MODIFY, 0, 0);
+        if (!err)
+            err = iwx_mld_link_cmd(sc, in, IWX_FW_CTXT_ACTION_MODIFY,
+                                   IWX_LINK_CONTEXT_MODIFY_ACTIVE |
+                                   IWX_LINK_CONTEXT_MODIFY_RATES_INFO, 1);
+    } else if (action == IWX_FW_CTXT_ACTION_MODIFY) {
+        uint32_t mask = IWX_LINK_CONTEXT_MODIFY_RATES_INFO |
+            IWX_LINK_CONTEXT_MODIFY_PROTECT_FLAGS |
+            IWX_LINK_CONTEXT_MODIFY_QOS_PARAMS |
+            IWX_LINK_CONTEXT_MODIFY_BEACON_TIMING;
+        if (assoc)
+            mask |= IWX_LINK_CONTEXT_MODIFY_HE_PARAMS;
+        err = iwx_mld_link_cmd(sc, in, IWX_FW_CTXT_ACTION_MODIFY, mask, 1);
+    }
+    return err;
+}
+
+int ItlIwx::
+iwx_mld_sta_cmd(struct iwx_softc *sc, struct iwx_node *in)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct ieee80211_node *ni = &in->in_ni;
+    struct iwx_sta_cfg_cmd cmd;
+    uint32_t agg_size = 0, dens = 0;
+    const uint32_t max_aggsize = (IWX_STA_FLG_MAX_AGG_SIZE_4M >> IWX_STA_FLG_MAX_AGG_SIZE_SHIFT);
+    int err;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.sta_id = htole32(IWX_STATION_ID);
+    cmd.link_id = htole32(IWX_MLD_LINK_ID);
+    IEEE80211_ADDR_COPY(cmd.peer_mld_address, in->in_macaddr);
+    IEEE80211_ADDR_COPY(cmd.peer_link_address, in->in_macaddr);
+    cmd.station_type = htole32(IWX_STATION_TYPE_PEER);
+    if (ic->ic_state >= IEEE80211_S_ASSOC)
+        cmd.assoc_id = htole32(ni->ni_associd);
+    cmd.mfp = htole32((ni->ni_flags & IEEE80211_NODE_MFP) ? 1 : 0);
+    if (iwx_mimo_enabled(sc) && ni->ni_rx_nss > 1)
+        cmd.mimo = htole32(1);
+
+    /* Linux iwl_mvm_get_sta_ampdu_dens(): peer's density and max A-MPDU exponent */
+    if (ni->ni_flags & (IEEE80211_NODE_HT | IEEE80211_NODE_VHT | IEEE80211_NODE_HE)) {
+        dens = (ni->ni_ampdu_param & IEEE80211_AMPDU_PARAM_SS) >> 2;
+        agg_size = ni->ni_ampdu_param & IEEE80211_AMPDU_PARAM_LE;
+        if (ni->ni_flags & (IEEE80211_NODE_VHT | IEEE80211_NODE_HE))
+            agg_size = (ni->ni_vhtcaps & IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK) >>
+                IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT;
+        if (ni->ni_flags & IEEE80211_NODE_HE)
+            agg_size += u8_get_bits(ni->ni_he_cap_elem.mac_cap_info[3],
+                                    IEEE80211_HE_MAC_CAP3_MAX_AMPDU_LEN_EXP_MASK);
+        cmd.tx_ampdu_spacing = htole32(dens);
+        cmd.tx_ampdu_max_size = htole32(min(max_aggsize, agg_size));
+    }
+    if (ni->ni_flags & IEEE80211_NODE_QOS)
+        cmd.sp_length = htole32(128);
+
+    if (ni->ni_flags & IEEE80211_NODE_HE) {
+        struct iwx_he_sta_context_cmd he;
+        unsigned ss, bw;
+        iwx_build_he_sta(ni, &he);
+        memset(cmd.pkt_ext, 7, sizeof(cmd.pkt_ext));   /* IWL_HE_PKT_EXT_NONE */
+        for (ss = 0; ss < 2; ss++)
+            for (bw = 0; bw < 4; bw++) {
+                cmd.pkt_ext[ss][bw][0] = he.pkt_ext[ss][bw][0];
+                cmd.pkt_ext[ss][bw][1] = he.pkt_ext[ss][bw][1];
+            }
+        cmd.htc_flags = he.htc_flags;
+        cmd.ack_enabled = htole32((le32toh(he.flags) & IWX_HE_ACK_ENABLED) ? 1 : 0);
+    }
+
+    err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_STA_CONFIG_CMD, IWX_MAC_CONF_GROUP, 0),
+                           0, sizeof(cmd), &cmd);
+    XYLog("MLD STA_CONFIG aid=%u mimo=%u dens=%u agg=%u he=%d -> %d\n",
+          le32toh(cmd.assoc_id), le32toh(cmd.mimo), dens, le32toh(cmd.tx_ampdu_max_size),
+          !!(ni->ni_flags & IEEE80211_NODE_HE), err);
+    if (!err)
+        sc->sc_flags |= IWX_FLAG_STA_ACTIVE;
+    return err;
+}
+
+int ItlIwx::
+iwx_mld_txq_remove(struct iwx_softc *sc, int tid)
+{
+    struct iwx_scd_queue_cfg_cmd cmd;
+    int err;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.operation = htole32(IWX_SCD_QUEUE_REMOVE);
+    cmd.u.remove.sta_mask = htole32(IWX_MLD_STA_MASK);
+    cmd.u.remove.tid = htole32(tid);
+    err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_SCD_QUEUE_CONFIG_CMD, IWX_DATA_PATH_GROUP, 0),
+                           0, sizeof(cmd), &cmd);
+    XYLog("MLD SCD_QUEUE_CONFIG remove tid=%d -> %d\n", tid, err);
+    return err;
+}
+
+int ItlIwx::
+iwx_mld_rm_sta_cmd(struct iwx_softc *sc)
+{
+    struct iwx_remove_sta_cmd cmd = { .sta_id = htole32(IWX_STATION_ID) };
+    int err;
+
+    /* Linux removes the station's queues before the station */
+    if (sc->sc_mld_mgmt_qid != IWX_INVALID_QUEUE) {
+        iwx_mld_txq_remove(sc, IWX_MGMT_TID);
+        iwx_reset_tx_ring(sc, &sc->txq[sc->sc_mld_mgmt_qid]);
+        sc->sc_mld_mgmt_qid = IWX_INVALID_QUEUE;
+    }
+    err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_STA_REMOVE_CMD, IWX_MAC_CONF_GROUP, 0),
+                           0, sizeof(cmd), &cmd);
+    XYLog("MLD STA_REMOVE -> %d\n", err);
+    sc->sc_flags &= ~IWX_FLAG_STA_ACTIVE;
+    return err;
+}
+
+int ItlIwx::
+iwx_mld_set_key(struct iwx_softc *sc, struct ieee80211_node *ni,
+                struct ieee80211_key *k, int add)
+{
+    struct iwx_sec_key_cmd cmd;
+    uint32_t flags = IWX_SEC_KEY_FLAG_CIPHER_CCMP;
+    int err;
+
+    if (k->k_flags & IEEE80211_KEY_GROUP)
+        flags |= IWX_SEC_KEY_FLAG_MCAST_KEY;
+    else if (ni && (ni->ni_flags & IEEE80211_NODE_MFP))
+        flags |= IWX_SEC_KEY_FLAG_MFP;
+
+    memset(&cmd, 0, sizeof(cmd));
+    if (add) {
+        cmd.action = htole32(IWX_FW_CTXT_ACTION_ADD);
+        cmd.u.add.sta_mask = htole32(IWX_MLD_STA_MASK);
+        cmd.u.add.key_id = htole32(k->k_id);
+        cmd.u.add.key_flags = htole32(flags);
+        memcpy(cmd.u.add.key, k->k_key, MIN(sizeof(cmd.u.add.key), k->k_len));
+        cmd.u.add.tx_seq = htole64(k->k_tsc);
+    } else {
+        cmd.action = htole32(IWX_FW_CTXT_ACTION_REMOVE);
+        cmd.u.remove.sta_mask = htole32(IWX_MLD_STA_MASK);
+        cmd.u.remove.key_id = htole32(k->k_id);
+        cmd.u.remove.key_flags = htole32(flags);
+    }
+    err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_SEC_KEY_CMD, IWX_DATA_PATH_GROUP, 0),
+                           IWX_CMD_ASYNC, sizeof(cmd), &cmd);
+    XYLog("MLD SEC_KEY %s id=%d flags=0x%x len=%d -> %d\n", add ? "add" : "remove",
+          k->k_id, flags, k->k_len, err);
+    return err;
+}
+
 int ItlIwx::
 iwx_auth(struct iwx_softc *sc)
 {
@@ -9943,9 +10284,11 @@ iwx_auth(struct iwx_softc *sc)
     if (err)
         goto rm_sta;
     
-    err = iwx_clear_statistics(sc);
-    if (err)
-        goto rm_sta;
+    if (!iwx_has_new_station_api(sc)) {
+        err = iwx_clear_statistics(sc);
+        if (err)
+            goto rm_sta;
+    }
     
     /*
      * Prevent the FW from wandering off channel during association
@@ -10263,6 +10606,8 @@ iwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
         /* Fallback to software crypto for other ciphers. */
         return (ieee80211_set_key(ic, ni, k));
     }
+    if (that->iwx_has_new_station_api(sc))
+        return that->iwx_mld_set_key(sc, ni, k, 1);
     
     memset(&cmd, 0, sizeof(cmd));
     
@@ -10296,6 +10641,10 @@ iwx_delete_key(struct ieee80211com *ic, struct ieee80211_node *ni,
     if (k->k_cipher != IEEE80211_CIPHER_CCMP) {
         /* Fallback to software crypto for other ciphers. */
         ieee80211_delete_key(ic, ni, k);
+        return;
+    }
+    if (that->iwx_has_new_station_api(sc)) {
+        that->iwx_mld_set_key(sc, ni, k, 0);
         return;
     }
     
@@ -10995,6 +11344,7 @@ iwx_init(struct _ifnet *ifp)
     for (i = 0; i < ARRAY_SIZE(sc->sc_tid_data); i++) {
         sc->sc_tid_data[i].qid = IWX_INVALID_QUEUE;
     }
+    sc->sc_mld_mgmt_qid = IWX_INVALID_QUEUE;
     
     //    rw_assert_wrlock(&sc->ioctl_rwl);
     

@@ -200,6 +200,12 @@ public:
     uint8_t    iwx_lookup_cmd_ver(struct iwx_softc *, uint8_t, uint8_t);
     uint8_t    iwx_lookup_notif_ver(struct iwx_softc *, uint8_t, uint8_t);
     int        iwx_has_new_station_api(struct iwx_softc *);
+    int        iwx_mld_link_cmd(struct iwx_softc *, struct iwx_node *, uint32_t, uint32_t, uint32_t);
+    int        iwx_mld_mac_cmd(struct iwx_softc *, struct iwx_node *, uint32_t, int);
+    int        iwx_mld_sta_cmd(struct iwx_softc *, struct iwx_node *);
+    int        iwx_mld_txq_remove(struct iwx_softc *, int);
+    int        iwx_mld_rm_sta_cmd(struct iwx_softc *);
+    int        iwx_mld_set_key(struct iwx_softc *, struct ieee80211_node *, struct ieee80211_key *, int);
     uint32_t    iwx_lmac_id(struct iwx_softc *, ieee80211_channel *);
     int    iwx_store_cscheme(struct iwx_softc *, uint8_t *, size_t);
     int    iwx_alloc_fw_monitor_block(struct iwx_softc *, uint8_t, uint8_t);

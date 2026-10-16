@@ -3514,6 +3514,194 @@ struct iwx_phy_context_cmd_v1 {
  * @dsp_cfg_flags: set to 0
  * @reserved: reserved to align to 64 bit
  */
+/*
+ * MLD command API (Bz / BE200 -92 firmware, capa MLD_API_SUPPORT).
+ * Layouts from Linux 6.12 fw/api/mac-cfg.h, datapath.h, mac.h.
+ */
+#define IWX_MAC_CONFIG_CMD          0x08    /* MAC_CONF_GROUP */
+#define IWX_LINK_CONFIG_CMD         0x09
+#define IWX_STA_CONFIG_CMD          0x0a
+#define IWX_STA_REMOVE_CMD          0x0c
+#define IWX_SCD_QUEUE_CONFIG_CMD    0x17    /* DATA_PATH_GROUP */
+#define IWX_SEC_KEY_CMD             0x18    /* DATA_PATH_GROUP */
+
+#define IWX_MAC_CFG_FILTER_ACCEPT_GRP       (1 << 2)
+#define IWX_MAC_CFG_FILTER_ACCEPT_BEACON    (1 << 3)
+
+struct iwx_mac_client_data {
+    uint8_t is_assoc;
+    uint8_t esr_transition_timeout;
+    uint16_t medium_sync_delay;
+    uint16_t assoc_id;
+    uint16_t reserved1;
+    uint16_t data_policy;
+    uint16_t reserved2;
+    uint32_t ctwin;
+} __packed; /* MAC_CONTEXT_CONFIG_CLIENT_DATA_API_S_VER_2 */
+
+struct iwx_mac_config_cmd {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t mac_type;
+    uint8_t local_mld_addr[6];
+    uint16_t reserved_for_local_mld_addr;
+    uint32_t filter_flags;
+    uint16_t he_support;
+    uint16_t he_ap_support;
+    uint32_t eht_support;
+    uint32_t nic_not_ack_enabled;
+    struct iwx_mac_client_data client;
+} __packed; /* MAC_CONTEXT_CONFIG_CMD_API_S_VER_2 */
+
+#define IWX_LINK_CONTEXT_MODIFY_ACTIVE          (1 << 0)
+#define IWX_LINK_CONTEXT_MODIFY_RATES_INFO      (1 << 1)
+#define IWX_LINK_CONTEXT_MODIFY_PROTECT_FLAGS   (1 << 2)
+#define IWX_LINK_CONTEXT_MODIFY_QOS_PARAMS      (1 << 3)
+#define IWX_LINK_CONTEXT_MODIFY_BEACON_TIMING   (1 << 4)
+#define IWX_LINK_CONTEXT_MODIFY_HE_PARAMS       (1 << 5)
+#define IWX_LINK_CONTEXT_MODIFY_BSS_COLOR_DISABLE (1 << 6)
+#define IWX_LINK_PROT_FLG_TGG_PROTECT   (1 << 0)
+#define IWX_LINK_PROT_FLG_HT_PROT       (1 << 1)
+#define IWX_LINK_PROT_FLG_FAT_PROT      (1 << 2)
+#define IWX_LINK_FLG_BSS_COLOR_DIS      (1 << 0)
+#define IWX_LINK_FLG_MU_EDCA_CW         (1 << 1)
+
+struct iwx_link_ac_qos {
+    uint16_t cw_min;
+    uint16_t cw_max;
+    uint8_t aifsn;
+    uint8_t fifos_mask;
+    uint16_t edca_txop;
+} __packed; /* AC_QOS_API_S_VER_2 */
+
+struct iwx_link_he_backoff_conf {
+    uint16_t cwmin;
+    uint16_t cwmax;
+    uint16_t aifsn;
+    uint16_t mu_time;
+} __packed;
+
+struct iwx_link_config_cmd {
+    uint32_t action;
+    uint32_t link_id;
+    uint32_t mac_id;
+    uint32_t phy_id;
+    uint8_t local_link_addr[6];
+    uint16_t reserved_for_local_link_addr;
+    uint32_t modify_mask;
+    uint32_t active;
+    uint32_t listen_lmac;   /* union with block_tx */
+    uint32_t cck_rates;
+    uint32_t ofdm_rates;
+    uint32_t cck_short_preamble;
+    uint32_t short_slot;
+    uint32_t protection_flags;
+    uint32_t qos_flags;
+    struct iwx_link_ac_qos ac[5];
+    uint8_t htc_trig_based_pkt_ext;
+    uint8_t rand_alloc_ecwmin;
+    uint8_t rand_alloc_ecwmax;
+    uint8_t ndp_fdbk_buff_th_exp;
+    struct iwx_link_he_backoff_conf trig_based_txf[4];
+    uint32_t bi;
+    uint32_t dtim_interval;
+    uint16_t puncture_mask;
+    uint16_t frame_time_rts_th;
+    uint32_t flags;
+    uint32_t flags_mask;
+    uint8_t ref_bssid_addr[6];
+    uint16_t reserved_for_ref_bssid_addr;
+    uint8_t bssid_index;
+    uint8_t bss_color;
+    uint8_t spec_link_id;
+    uint8_t ul_mu_data_disable;
+    uint8_t ibss_bssid_addr[6];
+    uint16_t reserved_for_ibss_bssid_addr;
+    uint32_t reserved3[8];
+} __packed; /* LINK_CONTEXT_CONFIG_CMD_API_S_VER_1.._VER_5 */
+
+#define IWX_STATION_TYPE_PEER   0
+
+struct iwx_sta_cfg_cmd {
+    uint32_t sta_id;
+    uint32_t link_id;
+    uint8_t peer_mld_address[6];
+    uint16_t reserved_for_peer_mld_address;
+    uint8_t peer_link_address[6];
+    uint16_t reserved_for_peer_link_address;
+    uint32_t station_type;
+    uint32_t assoc_id;
+    uint32_t beamform_flags;
+    uint32_t mfp;
+    uint32_t mimo;
+    uint32_t mimo_protection;
+    uint32_t ack_enabled;
+    uint32_t trig_rnd_alloc;
+    uint32_t tx_ampdu_spacing;
+    uint32_t tx_ampdu_max_size;
+    uint32_t sp_length;
+    uint32_t uapsd_acs;
+    uint8_t pkt_ext[2][5][2];   /* iwl_he_pkt_ext_v2 */
+    uint32_t htc_flags;
+} __packed; /* STA_CMD_API_S_VER_1 */
+
+struct iwx_remove_sta_cmd {
+    uint32_t sta_id;
+} __packed; /* REMOVE_STA_API_S_VER_1 */
+
+#define IWX_SCD_QUEUE_ADD       0
+#define IWX_SCD_QUEUE_REMOVE    1
+
+struct iwx_scd_queue_cfg_cmd {
+    uint32_t operation;
+    union {
+        struct {
+            uint32_t sta_mask;
+            uint8_t tid;
+            uint8_t reserved[3];
+            uint32_t flags;
+            uint32_t cb_size;
+            uint64_t bc_dram_addr;
+            uint64_t tfdq_dram_addr;
+        } __packed add;
+        struct {
+            uint32_t sta_mask;
+            uint32_t tid;
+        } __packed remove;
+    } __packed u;
+} __packed; /* TX_QUEUE_CFG_CMD_API_S_VER_3 */
+
+#define IWX_SEC_KEY_FLAG_CIPHER_CCMP    0x02
+#define IWX_SEC_KEY_FLAG_MFP            0x20
+#define IWX_SEC_KEY_FLAG_MCAST_KEY      0x40
+
+struct iwx_sec_key_cmd {
+    uint32_t action;
+    union {
+        struct {
+            uint32_t sta_mask;
+            uint32_t key_id;
+            uint32_t key_flags;
+            uint8_t key[32];
+            uint8_t tkip_mic_rx_key[8];
+            uint8_t tkip_mic_tx_key[8];
+            uint64_t rx_seq;
+            uint64_t tx_seq;
+        } __packed add;
+        struct {
+            uint32_t sta_mask;
+            uint32_t key_id;
+            uint32_t key_flags;
+        } __packed remove;
+    } __packed u;
+} __packed; /* SEC_KEY_CMD_API_S_VER_1 */
+
+static_assert(sizeof(struct iwx_mac_config_cmd) == 52, "MAC_CONFIG v2 ABI");
+static_assert(sizeof(struct iwx_link_config_cmd) == 208, "LINK_CONFIG v2 ABI");
+static_assert(sizeof(struct iwx_sta_cfg_cmd) == 96, "STA_CONFIG v1 ABI");
+static_assert(sizeof(struct iwx_scd_queue_cfg_cmd) == 36, "SCD_QUEUE_CONFIG v3 ABI");
+static_assert(sizeof(struct iwx_sec_key_cmd) == 80, "SEC_KEY v1 ABI");
+
 /* RLC_CONFIG_CMD (DATA_PATH_GROUP 0x8), Linux fw/api/datapath.h; v2 replaces
  * PHY_CONTEXT_CMD rxchain_info on Bz (PHY_CONTEXT_CMD v4+) */
 #define IWX_RLC_CONFIG_CMD 0x08
