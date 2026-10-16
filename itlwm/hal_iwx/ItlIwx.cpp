@@ -9970,6 +9970,7 @@ iwx_phy_ctxt_update(struct iwx_softc *sc, struct iwx_phy_ctxt *phyctxt,
 #define IWX_MLD_LINK_ID     0
 #define IWX_MLD_STA_MASK    (1U << IWX_STATION_ID)
 #define IWX_MLD_AID(a)      ((a) & 0x7ff)   /* mac80211 ieee80211_assoc_success() */
+#define IWX_MLD_KEY_VALID   0x80000000U
 
 int ItlIwx::
 iwx_mld_link_cmd(struct iwx_softc *sc, struct iwx_node *in, uint32_t action,
@@ -10207,6 +10208,27 @@ iwx_mld_rm_sta_cmd(struct iwx_softc *sc)
     struct iwx_remove_sta_cmd cmd = { .sta_id = htole32(IWX_STATION_ID) };
     int err;
 
+    /*
+     * Linux iwl_mvm_sta_del() -> iwl_mvm_sec_key_remove_ap(): every key of
+     * the AP station goes before STA_REMOVE. net80211 only deletes the
+     * group key on teardown; removing a station that still owns the PTK
+     * asserts the firmware (t15: SYSASSERT 0x251B on STA_REMOVE).
+     */
+    for (int id = 0; id < (int)nitems(sc->sc_mld_key_flags); id++) {
+        struct iwx_sec_key_cmd kcmd;
+        if (!(sc->sc_mld_key_flags[id] & IWX_MLD_KEY_VALID))
+            continue;
+        memset(&kcmd, 0, sizeof(kcmd));
+        kcmd.action = htole32(IWX_FW_CTXT_ACTION_REMOVE);
+        kcmd.u.remove.sta_mask = htole32(IWX_MLD_STA_MASK);
+        kcmd.u.remove.key_id = htole32(id);
+        kcmd.u.remove.key_flags = htole32(sc->sc_mld_key_flags[id] & ~IWX_MLD_KEY_VALID);
+        err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_SEC_KEY_CMD, IWX_DATA_PATH_GROUP, 0),
+                               0, sizeof(kcmd), &kcmd);
+        XYLog("MLD SEC_KEY remove leftover id=%d -> %d\n", id, err);
+        sc->sc_mld_key_flags[id] = 0;
+    }
+
     /* Linux removes the station's queues before the station */
     for (int tid = 0; tid < IWX_MAX_TID_COUNT; tid++) {
         int qid = sc->sc_mld_tid_qid[tid];
@@ -10239,7 +10261,7 @@ iwx_mld_baid_cmd(struct iwx_softc *sc, uint8_t tid, uint16_t ssn,
                  uint16_t winsize, int start, uint32_t *status)
 {
     struct iwx_rx_baid_cfg_cmd cmd;
-    uint32_t baid = 0;
+    uint32_t baid = 0;   /* response word; meaningless on remove */
     int err;
 
     memset(&cmd, 0, sizeof(cmd));
@@ -10301,6 +10323,8 @@ iwx_mld_set_key(struct iwx_softc *sc, struct ieee80211_node *ni,
                            IWX_CMD_ASYNC, sizeof(cmd), &cmd);
     XYLog("MLD SEC_KEY %s id=%d flags=0x%x len=%d -> %d\n", add ? "add" : "remove",
           k->k_id, flags, k->k_len, err);
+    if (!err && k->k_id < nitems(sc->sc_mld_key_flags))
+        sc->sc_mld_key_flags[k->k_id] = add ? (flags | IWX_MLD_KEY_VALID) : 0;
     return err;
 }
 
@@ -11437,6 +11461,7 @@ iwx_init(struct _ifnet *ifp)
     sc->sc_mld_mgmt_qid = IWX_INVALID_QUEUE;
     for (i = 0; i < IWX_MAX_TID_COUNT; i++)
         sc->sc_mld_tid_qid[i] = IWX_INVALID_QUEUE;
+    memset(sc->sc_mld_key_flags, 0, sizeof(sc->sc_mld_key_flags));
     
     //    rw_assert_wrlock(&sc->ioctl_rwl);
     
