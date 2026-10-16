@@ -267,9 +267,13 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
     }
     scanPending = true;
     scanCompleted = false;
-    scanSkipCompletion = ic->ic_state == IEEE80211_S_SCAN &&
-        ((scan.type != 2 && scan.ssidLength != 0) ||
-         ic->ic_wcl_scan_ssid_length != 0 || ic->ic_des_esslen != 0);
+    /*
+     * A request that lands in the middle of net80211's own scan would
+     * otherwise complete when that scan ends, so WCL only saw the channels
+     * left in it (BE200 t10: 0-2 of ~35 networks). Complete on the next
+     * full scan, which also uses WCL's channel list and SSID.
+     */
+    scanSkipCompletion = ic->ic_state == IEEE80211_S_SCAN;
     ic->ic_wcl_scan_requested = true;
     ic->ic_wcl_scan_active = scan.type != 2;
     ic->ic_wcl_scan_ssid_length = scan.type == 2 ? 0 : scan.ssidLength;

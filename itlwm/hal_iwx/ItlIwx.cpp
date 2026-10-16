@@ -6032,6 +6032,19 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
         return;
     }
     
+    /*
+     * Strip the MIC/CRC bytes the RADA might not have removed (it may be
+     * disabled, e.g. for management frames), as Linux iwl_mvm_create_skb()
+     * does. Bz firmware leaves the 4-byte FCS on beacons; with it the IE
+     * list doesn't end cleanly and the WCL glue rejects every scan result.
+     */
+    if (ic->ic_opmode != IEEE80211_M_MONITOR) {
+        uint32_t mic_crc_len = ((desc->mac_flags1 &
+            IWX_RX_MPDU_MFLG1_MIC_CRC_LEN_MASK) >> 4) << 1;
+        if (len > mic_crc_len)
+            len -= mic_crc_len;
+    }
+    
     //    m->m_data = pktdata + sizeof(*desc);
     //    m->m_pkthdr.len = m->m_len = len;
     mbuf_setdata(m, (uint8_t*)pktdata + desc_size, len);
