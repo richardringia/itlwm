@@ -20,6 +20,8 @@
 
 #include "compat.h"
 #include <linux/types.h>   /* XYLog */
+#include <IOKit/IOLocks.h>
+#include <stdarg.h>
 #include <sys/random.h>
 #include <sys/param.h>
 #include <sys/proc.h>
@@ -91,6 +93,86 @@ pci_configure_msix(IOPCIDevice *dev, int nvec)
     IOReturn ret = IOPCIDevice_configureInterrupts(dev, kIOInterruptTypePCIMessagedX, 1, nvec, 0);
     XYLog("%s: configureInterrupts(MSI-X, 1..%d) -> 0x%x\n", __FUNCTION__, nvec, ret);
     return ret == kIOReturnSuccess ? 0 : 1;
+}
+
+
+/*
+ * Debug log ring. IOLog output from this kext does not reliably reach the unified
+ * log on macOS 26, so every XYLog line is also kept here and published as the
+ * "itlwm-log" property of the PCI device: `ioreg -rn PXSX -l | grep itlwm-log`.
+ * Appending is lock-protected and safe anywhere; publishing allocates and must
+ * only run in thread context (itlwm_ring_flush).
+ */
+#define ITLWM_RING_SIZE (32 * 1024)
+static char gItlwmRing[ITLWM_RING_SIZE];
+static size_t gItlwmRingLen;
+static IOSimpleLock *gItlwmRingLock;
+static IOService *gItlwmRingTarget;
+
+static IOSimpleLock *
+itlwm_ring_lock(void)
+{
+    if (gItlwmRingLock == NULL) {
+        IOSimpleLock *l = IOSimpleLockAlloc();
+        if (!OSCompareAndSwapPtr(NULL, l, (void * volatile *)&gItlwmRingLock))
+            IOSimpleLockFree(l);
+    }
+    return gItlwmRingLock;
+}
+
+extern "C" void
+itlwm_ring_log(const char *fmt, ...)
+{
+    char line[320];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n <= 0)
+        return;
+    if ((size_t)n >= sizeof(line))
+        n = sizeof(line) - 1;
+    IOSimpleLock *lk = itlwm_ring_lock();
+    if (!lk)
+        return;
+    IOInterruptState is = IOSimpleLockLockDisableInterrupt(lk);
+    if (gItlwmRingLen + n >= ITLWM_RING_SIZE) {
+        /* drop the oldest half */
+        size_t keep = gItlwmRingLen / 2;
+        memmove(gItlwmRing, gItlwmRing + gItlwmRingLen - keep, keep);
+        gItlwmRingLen = keep;
+    }
+    memcpy(gItlwmRing + gItlwmRingLen, line, n);
+    gItlwmRingLen += n;
+    gItlwmRing[gItlwmRingLen] = '\0';
+    IOSimpleLockUnlockEnableInterrupt(lk, is);
+}
+
+void
+itlwm_ring_set_target(IOService *target)
+{
+    gItlwmRingTarget = target;
+    itlwm_ring_flush();
+}
+
+void
+itlwm_ring_flush(void)
+{
+    if (!gItlwmRingTarget)
+        return;
+    char *copy = (char *)IOMalloc(ITLWM_RING_SIZE);
+    if (!copy)
+        return;
+    IOSimpleLock *lk = itlwm_ring_lock();
+    IOInterruptState is = IOSimpleLockLockDisableInterrupt(lk);
+    memcpy(copy, gItlwmRing, gItlwmRingLen + 1);
+    IOSimpleLockUnlockEnableInterrupt(lk, is);
+    OSString *str = OSString::withCString(copy);
+    IOFree(copy, ITLWM_RING_SIZE);
+    if (str) {
+        gItlwmRingTarget->setProperty("itlwm-log", str);
+        str->release();
+    }
 }
 
 /* Find the first interrupt index whose type matches `typeMask`; -1 if none. */

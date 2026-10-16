@@ -263,8 +263,14 @@ initCCLogs()
     return driverLogPipe && driverDataPathPipe && driverSnapshotsPipe && driverFaultReporter;
 }
 
+namespace {
+/* Publishes the debug log ring whenever start() returns, on any path. */
+struct ItlwmLogFlushGuard { ~ItlwmLogFlushGuard() { itlwm_ring_flush(); } };
+}
+
 bool AirportItlwm::start(IOService *provider)
 {
+    ItlwmLogFlushGuard logFlush;
 #if __IO80211_TARGET == __MAC_15_2
     if (version_major != 24 || version_minor < 2)
         return false;
@@ -340,6 +346,7 @@ bool AirportItlwm::start(IOService *provider)
         fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_HEON;
 #endif
 
+    XYLog("%s: calling HAL attach\n", __FUNCTION__);
     if (!fHalService->attach(pciNub)) {
         XYLog("attach fail\n");
         super::stop(pciNub);

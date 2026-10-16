@@ -73,6 +73,7 @@ probe(IOService *provider, SInt32 *score)
     if (ItlIwx::iwx_match(device)) {
         isMatch = true;
         fHalService = new ItlIwx;
+        itlwm_ring_set_target(device);   /* publish our log on the PCI device */
     }
     if (!isMatch && ItlIwm::iwm_match(device)) {
         isMatch = true;
@@ -102,6 +103,7 @@ probe(IOService *provider, SInt32 *score)
             if (pci_configure_msix(device, 1))
                 XYLog("%s WARNING: early MSI-X request failed, attach will retry\n", __FUNCTION__);
             this->pciNub = device;
+            itlwm_ring_flush();
             return this;
         }
         device->findPCICapability(PCI_CAP_ID_MSIX, &msixCap);
@@ -138,6 +140,8 @@ start(IOService *provider)
     registerPowerDriver(this, powerStateArray, 2);
     provider->joinPMtree(this);
     registerService();
+    XYLog("%s: wrapper started, controller can match now\n", __FUNCTION__);
+    itlwm_ring_flush();
     return true;
 }
 

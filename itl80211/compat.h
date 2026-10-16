@@ -291,6 +291,10 @@ int     pci_intr_map_msix(struct pci_attach_args *pa, int vec, pci_intr_handle_t
 /* Ask IOPCIFamily for `nvec` MSI-X vectors. Must run before anything resolves the device's
  * interrupts (getInterruptType, IOInterruptSpecifiers, saveDeviceState). 0 = success. */
 int     pci_configure_msix(IOPCIDevice *dev, int nvec);
+/* Log ring → IORegistry: set the service that carries the "itlwm-log" property,
+ * and publish the current ring (call from thread context only). */
+void    itlwm_ring_set_target(IOService *target);
+void    itlwm_ring_flush(void);
 int		pci_intr_map_msi(struct pci_attach_args *paa, pci_intr_handle_t *ih);
 int		pci_intr_map(struct pci_attach_args *paa, pci_intr_handle_t *ih);
 void*		pci_intr_establish(pci_chipset_tag_t pc, pci_intr_handle_t ih, int level, int (*handler)(void *), void *arg);
