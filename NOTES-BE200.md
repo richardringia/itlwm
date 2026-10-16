@@ -15,15 +15,18 @@ Reference trees: `~/hackintosh/wifi/ref/linux-6.12/drivers/net/wireless/intel/iw
 ## Linux → itlwm porting map (fill in as we go)
 | Linux (6.12) | itlwm | status |
 |---|---|---|
-| `cfg/bz.c: iwl_gl_trans_cfg`, `iwl_cfg_gl` | `ItlIwx.cpp` cfg tables | todo |
-| `pcie/drv.c: 0x272b → iwl_gl_trans_cfg`, `_IWL_DEV_INFO(GL, FM)` rows | `iwx_devices[]`, `iwl_dev_info_table[]` | todo |
-| `iwl-csr.h: CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ (BIT21)`, `MSIX_HW_INT_CAUSES_REG_SW_ERR_BZ (BIT5)` | `if_iwxreg.h` | todo |
-| `pcie/trans.c` 11 BZ branches (reset, mac access, sw_reset, power, interrupts) | `iwx_*` equivalents | todo |
-| `pcie/rx.c` 4 BZ branches (RBD/queue regs) | `iwx_rx_*` | todo |
-| `pcie/trans-gen2.c` 2 (fw start / IML) ; `pcie/tx-gen2.c` 1 | `iwx_start_fw`, `iwx_tx` | todo |
-| `iwl-io.c` 2 (grab NIC access for BZ) | `iwx_nic_lock` | todo |
-| MSI-X vector allocation (`iwl_pcie_set_interrupt_capa`) | `iwx_attach` interrupt setup | todo |
+| `cfg/bz.c: iwl_gl_trans_cfg`, `iwl_cfg_gl` | `ItlIwx.cpp` cfg tables | done 2f3e21f |
+| `pcie/drv.c: 0x272b → iwl_gl_trans_cfg`, `_IWL_DEV_INFO(GL, FM)` rows | `iwx_devices[]`, `iwl_dev_info_table[]` | done 2f3e21f |
+| `iwl-csr.h` Bz bits/registers (see NOTES-BZ-PORTING-MAP §0) | `if_iwxreg.h` | done 1097b26 (D3/CNVI/CRF regs still todo) |
+| `pcie/trans.c` 11 BZ branches (reset, mac access, sw_reset, power, interrupts) | `iwx_sw_reset`, `iwx_nic_lock/unlock`, `iwx_apm_stop`, `iwx_stop_device`, `iwx_conf_msix_hw`, bc_tbl size | done 1097b26 (D3 paths deferred to Phase 5) |
+| `pcie/rx.c` 4 BZ branches (RBD/queue regs) | RX wr ptr via HBUS_TARG_WRPTR, used_bd 4 B | done 1097b26 (completion descs still not read — itlwm drains in order) |
+| `pcie/trans-gen2.c` 2 (fw start / IML) ; `pcie/tx-gen2.c` 1 | gen3 boot: FUNC_SCRATCH + ROM_START + IML spin; apm_stop MAC_INIT | done 1097b26 (tx-gen2 A-step quirk n/a for GL) |
+| `iwl-io.c` 2 (grab NIC access, finish_nic_init) | `iwx_nic_lock`, `iwx_finish_nic_init` | done 1097b26 (force_nmi via CSR_DOORBELL_VECTOR todo) |
+| MSI-X vector allocation (`iwl_pcie_set_interrupt_capa`) | `pci_intr_map_msix` (compat.cpp) + `iwx_attach` | done 1c120df/1097b26 — single shared vector |
 | fw API 68 → 92: TLVs, MLD cmds (Phase 3) | many | todo |
+
+## Phase 1 status (2026-10-16)
+All attach/boot-path branches ported; **not compiled yet** (no Xcode). Next: build, fix errors, then test boot from the USB stick EFI and look for `IML load: irq=1` and ALIVE in the log. Open: `mac_addr_from_csr` fallback, `iwx_intr_msix` logging of RESET_DONE/TOP_FATAL_ERR, TLV parsing for -92 ucode.
 
 ## Decisions
 - Firmware API target: **92** (Linux 6.12 BZ range 90–93).
