@@ -12181,6 +12181,10 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
         task_add(systq, &sc->init_task);
     }
     
+    /* Bz: TOP (platform) fatal error; Linux only logs it, recovery follows via SW_ERR */
+    if (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_TOP_FATAL_ERR)
+        XYLog("%s: TOP fatal error\n", DEVNAME(sc));
+
     if (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_HW_ERR) {
         XYLog("%s: hardware error, stopping device \n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
