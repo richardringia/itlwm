@@ -117,6 +117,7 @@ void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
 {
     struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
     (*ifp->if_watchdog)(ifp);
+    itlwm_ring_flush();   /* keep the "itlwm-log" IORegistry property current (workloop thread) */
 
     watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
 }

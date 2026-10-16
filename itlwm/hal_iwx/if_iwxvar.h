@@ -226,7 +226,7 @@ struct iwx_tx_radiotap_header {
 	 (1 << IEEE80211_RADIOTAP_RATE) |				\
 	 (1 << IEEE80211_RADIOTAP_CHANNEL))
 
-#define IWX_UCODE_SECT_MAX 60
+#define IWX_UCODE_SECT_MAX 128  /* Bz -92 ucode has 71 RT sections (29 LMAC + 18 UMAC + 22 paging + 2 separators) */
 
 /*
  * fw_status is used to determine if we've already parsed the firmware file
