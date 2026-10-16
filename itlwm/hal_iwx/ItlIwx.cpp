@@ -721,6 +721,16 @@ iwx_lookup_cmd_ver(struct iwx_softc *sc, uint8_t grp, uint8_t cmd)
     return IWX_FW_CMD_VER_UNKNOWN;
 }
 
+/* Linux iwl_mvm_has_new_station_api(): MLD firmware (Bz/BE200) dropped ADD_STA */
+int ItlIwx::
+iwx_has_new_station_api(struct iwx_softc *sc)
+{
+    uint8_t ver = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_ADD_STA);
+
+    return isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_MLD_API_SUPPORT) ||
+        (ver != IWX_FW_CMD_VER_UNKNOWN && ver >= 12);
+}
+
 uint8_t ItlIwx::
 iwx_lookup_notif_ver(struct iwx_softc *sc, uint8_t grp, uint8_t cmd)
 {
@@ -6555,12 +6565,30 @@ iwx_phy_ctxt_cmd_v3(struct iwx_softc *sc, struct iwx_phy_ctxt *ctxt,
         active_cnt = 2;
     }
     
-    cmd.rxchain_info = htole32(iwx_fw_valid_rx_ant(sc) <<
+    uint32_t rxchain = htole32(iwx_fw_valid_rx_ant(sc) <<
                                IWX_PHY_RX_CHAIN_VALID_POS);
-    cmd.rxchain_info |= htole32(idle_cnt << IWX_PHY_RX_CHAIN_CNT_POS);
-    cmd.rxchain_info |= htole32(active_cnt <<
-                                IWX_PHY_RX_CHAIN_MIMO_CNT_POS);
-    return iwx_send_cmd_pdu(sc, IWX_PHY_CONTEXT_CMD, 0, sizeof(cmd), &cmd);
+    rxchain |= htole32(idle_cnt << IWX_PHY_RX_CHAIN_CNT_POS);
+    rxchain |= htole32(active_cnt << IWX_PHY_RX_CHAIN_MIMO_CNT_POS);
+
+    /*
+     * With RLC_CONFIG_CMD v2 (Bz) the rx chains move to a separate command
+     * and this field is reserved/sbb (PHY_CONTEXT_CMD v4+).
+     */
+    uint8_t rlc_ver = iwx_lookup_cmd_ver(sc, IWX_DATA_PATH_GROUP, IWX_RLC_CONFIG_CMD);
+    bool use_rlc = rlc_ver != IWX_FW_CMD_VER_UNKNOWN && rlc_ver >= 2;
+    if (!use_rlc)
+        cmd.rxchain_info = rxchain;
+
+    int err = iwx_send_cmd_pdu(sc, IWX_PHY_CONTEXT_CMD, 0, sizeof(cmd), &cmd);
+    if (err || !use_rlc || action == IWX_FW_CTXT_ACTION_REMOVE)
+        return err;
+
+    struct iwx_rlc_config_cmd rlc;
+    memset(&rlc, 0, sizeof(rlc));
+    rlc.phy_id = htole32(ctxt->id);
+    rlc.rx_chain_info = rxchain;
+    return iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_RLC_CONFIG_CMD, IWX_DATA_PATH_GROUP, 0),
+                            0, sizeof(rlc), &rlc);
 }
 
 int ItlIwx::
@@ -6621,7 +6649,8 @@ iwx_phy_ctxt_cmd(struct iwx_softc *sc, struct iwx_phy_ctxt *ctxt,
     uint8_t active_cnt, idle_cnt;
     struct ieee80211_channel *chan = ctxt->channel;
     
-    if (iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_PHY_CONTEXT_CMD) == 3)
+    uint8_t phy_ver = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_PHY_CONTEXT_CMD);
+    if (phy_ver != IWX_FW_CMD_VER_UNKNOWN && phy_ver >= 3 && phy_ver <= 6)
         return iwx_phy_ctxt_cmd_v3(sc, ctxt, chains_static,
                                    chains_dynamic, action, apply_time);
     
@@ -7838,6 +7867,7 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
     struct ieee80211com *ic = &sc->sc_ic;
     struct ieee80211_channel *c;
     uint8_t nchan;
+    uint8_t scan_ver = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_SCAN_REQ_UMAC);
     
     for (nchan = 0, c = &ic->ic_channels[1];
          c <= &ic->ic_channels[IEEE80211_CHAN_MAX] &&
@@ -7855,13 +7885,18 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
 #endif
         
         channel_num = ieee80211_mhz2ieee(c->ic_freq, 0);
+        chan->flags = 0;
         if (isset(sc->sc_ucode_api,
                   IWX_UCODE_TLV_API_SCAN_EXT_CHAN_VER)) {
+            uint8_t band = IEEE80211_IS_CHAN_2GHZ(c) ?
+                IWX_PHY_BAND_24 : IWX_PHY_BAND_5;
             chan->v2.channel_num = channel_num;
-            if (IEEE80211_IS_CHAN_2GHZ(c))
-                chan->v2.band = IWX_PHY_BAND_24;
-            else
-                chan->v2.band = IWX_PHY_BAND_5;
+            if (scan_ver != IWX_FW_CMD_VER_UNKNOWN && scan_ver >= 17) {
+                /* v17: band in flags[31:30], byte is psd_20 */
+                chan->flags = htole32((uint32_t)band << IWX_CHAN_CFG_FLAGS_BAND_POS);
+                chan->v2.band = 0;
+            } else
+                chan->v2.band = band;
             chan->v2.iter_count = 1;
             chan->v2.iter_interval = 0;
         } else {
@@ -7876,7 +7911,7 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
 #else
         if (n_ssids != 0 && !bgscan)
 #endif
-            chan->flags = htole32(1 << 0); /* select SSID 0 */
+            chan->flags |= htole32(1 << 0); /* select SSID 0 */
         chan++;
         nchan++;
     }
@@ -8031,8 +8066,9 @@ iwx_config_umac_scan(struct iwx_softc *sc)
     scan_config->tx_chains = htole32(iwx_fw_valid_tx_ant(sc));
     scan_config->rx_chains = htole32(iwx_fw_valid_rx_ant(sc));
     
-    cmdver = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_ADD_STA);
-    if (cmdver == IWX_FW_CMD_VER_UNKNOWN || cmdver < 12)
+    /* Linux iwl_mvm_config_scan() */
+    cmdver = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_SCAN_CFG_CMD);
+    if (!iwx_has_new_station_api(sc))
         scan_config->bcast_sta_id = IWX_AUX_STA_ID;
     else if (cmdver == IWX_FW_CMD_VER_UNKNOWN || cmdver < 5)
         scan_config->bcast_sta_id = 0xFF;
@@ -8135,8 +8171,8 @@ iwx_umac_scan_size(struct iwx_softc *sc)
     
     if (scan_ver == 12)
         return sizeof(iwx_scan_req_umac_v12);
-    else if (scan_ver == 14)
-        return sizeof(iwx_scan_req_umac_v14);
+    else if (scan_ver >= 14 && scan_ver <= 17)
+        return sizeof(iwx_scan_req_umac_v14); /* same layout v14..v17 (Linux iwl_scan_req_umac_v17) */
     
     if (isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_ADAPTIVE_DWELL_V2))
         base_size = IWX_SCAN_REQ_UMAC_SIZE_V8;
@@ -8251,7 +8287,7 @@ iwx_umac_scan(struct iwx_softc *sc, int bgscan)
     
     if (scan_ver == 12)
         return iwx_umac_scan_v12(sc, bgscan);
-    else if (scan_ver == 14)
+    else if (scan_ver >= 14 && scan_ver <= 17)
         return iwx_umac_scan_v14(sc, bgscan);
     
     req_len = iwx_umac_scan_size(sc);
@@ -10686,6 +10722,22 @@ iwx_send_update_mcc_cmd(struct iwx_softc *sc, const char *alpha2)
         goto out;
     }
     
+    if (iwx_lookup_notif_ver(sc, IWX_LONG_GROUP, IWX_MCC_UPDATE_CMD) != IWX_FW_CMD_VER_UNKNOWN &&
+        iwx_lookup_notif_ver(sc, IWX_LONG_GROUP, IWX_MCC_UPDATE_CMD) >= 8) {
+        struct iwx_mcc_update_resp_v8 *r8 = (struct iwx_mcc_update_resp_v8 *)pkt->data;
+        uint32_t n = le32toh(r8->n_channels);
+        if (resp_len < sizeof(*r8) ||
+            resp_len != sizeof(*r8) + n * sizeof(r8->channels[0])) {
+            XYLog("%s: MCC v8 resp_len %zu n_channels %u mismatch\n", __FUNCTION__, resp_len, n);
+            err = EIO;
+            goto out;
+        }
+        XYLog("MCC v8 status=0x%x mcc=0x%x cap=0x%x source_id=%d n_channels=%u\n",
+              le32toh(r8->status), le16toh(r8->mcc), le32toh(r8->cap), r8->source_id, n);
+        iwx_init_channel_map(sc, NULL, r8->channels, n);
+        goto out;
+    }
+
     resp = (struct iwx_mcc_update_resp *)pkt->data;
     if (resp_len != sizeof(*resp) +
         resp->n_channels * sizeof(resp->channels[0])) {
@@ -10791,8 +10843,12 @@ iwx_init_hw(struct iwx_softc *sc)
             goto err;
     }
     
-    /* Add auxiliary station for scanning */
-    err = iwx_add_aux_sta(sc);
+    /*
+     * Add auxiliary station for scanning. Firmware with the new station
+     * API (MLD, Bz) uses an internal aux station; ADD_STA does not exist
+     * there and sending it asserts the firmware (Linux iwl_mvm_up()).
+     */
+    err = iwx_has_new_station_api(sc) ? 0 : iwx_add_aux_sta(sc);
     if (err) {
         XYLog("%s: could not add aux station (error %d)\n",
               DEVNAME(sc), err);
@@ -11351,7 +11407,7 @@ iwx_nic_umac_error(struct iwx_softc *sc)
     
     base = sc->sc_uc.uc_umac_error_event_table;
     
-    if (base < 0x400000) {
+    if (base < (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ ? 0xD0000 : 0x400000)) {
         XYLog("%s: Invalid error log pointer 0x%08x\n",
               DEVNAME(sc), base);
         return;
@@ -11444,7 +11500,7 @@ iwx_nic_error(struct iwx_softc *sc)
     
     XYLog("%s: dumping device error log\n", DEVNAME(sc));
     base = sc->sc_uc.uc_lmac_error_event_table[0];
-    if (base < 0x400000) {
+    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ ? base == 0 : base < 0x400000) {
         XYLog("%s: Invalid error log pointer 0x%08x\n",
               DEVNAME(sc), base);
         return;

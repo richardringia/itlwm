@@ -1448,6 +1448,8 @@ enum iwx_msix_ivar_for_cause {
 #define IWX_UCODE_TLV_CAPA_LQM_SUPPORT            81
 #define IWX_UCODE_TLV_CAPA_LED_CMD_SUPPORT        88
 
+#define IWX_UCODE_TLV_CAPA_MLD_API_SUPPORT        110
+
 #define IWX_NUM_UCODE_TLV_CAPA 128
 
 /*
@@ -3512,6 +3514,21 @@ struct iwx_phy_context_cmd_v1 {
  * @dsp_cfg_flags: set to 0
  * @reserved: reserved to align to 64 bit
  */
+/* RLC_CONFIG_CMD (DATA_PATH_GROUP 0x8), Linux fw/api/datapath.h; v2 replaces
+ * PHY_CONTEXT_CMD rxchain_info on Bz (PHY_CONTEXT_CMD v4+) */
+#define IWX_RLC_CONFIG_CMD 0x08
+struct iwx_rlc_config_cmd {
+    uint32_t phy_id;
+    uint32_t rx_chain_info;
+    uint32_t rlc_reserved;
+    uint32_t chain_a_sad_mode;
+    uint32_t chain_b_sad_mode;
+    uint32_t sad_mac_id;
+    uint32_t sad_reserved;
+    uint8_t flags;
+    uint8_t reserved[3];
+} __packed; /* RLC_CONFIG_CMD_API_S_VER_2 */
+
 struct iwx_phy_context_cmd {
     /* COMMON_INDEX_HDR_API_S_VER_1 */
     uint32_t id_and_color;
@@ -6975,6 +6992,8 @@ struct iwx_scan_config {
  * @iter_count:        repetition count for the channel.
  * @iter_interval:    interval between two scan iterations on one channel.
  */
+/* scan cmd v17+: band moves from v2.band into flags[31:30], v2.band becomes psd_20 */
+#define IWX_CHAN_CFG_FLAGS_BAND_POS 30
 struct iwx_scan_channel_cfg_umac {
     uint32_t flags;
     union {
@@ -7957,6 +7976,19 @@ struct iwx_mcc_update_resp_v3 {
  * @channels: channel control data map, DWORD for each channel. Only the first
  *    16bits are used.
  */
+struct iwx_mcc_update_resp_v8 {
+    uint32_t status;
+    uint16_t mcc;
+    uint8_t padding[2];
+    uint32_t cap;
+    uint16_t time;
+    uint16_t geo_info;
+    uint8_t source_id;
+    uint8_t reserved[3];
+    uint32_t n_channels;
+    uint32_t channels[0];
+} __packed; /* LAR_UPDATE_MCC_CMD_RESP_S_VER_8 */
+
 struct iwx_mcc_update_resp {
     uint32_t status;
     uint16_t mcc;
