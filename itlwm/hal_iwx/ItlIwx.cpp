@@ -12173,6 +12173,14 @@ const struct iwl_cfg_trans_params iwl_ma_trans_cfg = {
     .integrated = 1,
 };
 
+/* Gl (BE200 / BE202): discrete M.2 card, Bz MAC family. Mirrors Linux iwl_gl_trans_cfg. */
+const struct iwl_cfg_trans_params iwl_gl_trans_cfg = {
+    .device_family = IWX_DEVICE_FAMILY_BZ,
+    .xtal_latency = 12000,
+    .low_latency_xtal = true,
+    .umac_prph_offset = 0x300000,
+};
+
 const struct iwl_cfg_trans_params iwl_ax200_trans_cfg = {
     .device_family = IWX_DEVICE_FAMILY_22000,
     .bisr_workaround = 1,
@@ -12301,6 +12309,19 @@ const struct iwl_cfg iwl_cfg_ma_a0_fm_a0 = {
     .num_rbds = IWL_NUM_RBDS_AX210_HE,
 };
 
+/*
+ * Gl MAC + FM RF = BE200 (320 MHz) / BE202 (160 MHz).
+ * Firmware: Linux 6.12 cfg/bz.c IWL_BZ_UCODE_API_MIN 90 .. MAX 93; we embed -92.
+ * Bz-class devices want IWL_NUM_RBDS_BZ_EHT (8192) RBDs in Linux; start with the
+ * AX210 count until the RX path is validated on this family.
+ */
+const struct iwl_cfg iwl_cfg_gl = {
+    .fwname = "iwlwifi-gl-c0-fm-c0-92.ucode",
+    .uhb_supported = 1,
+    .device_family = IWX_DEVICE_FAMILY_BZ,
+    .num_rbds = IWL_NUM_RBDS_AX210_HE,
+};
+
 const struct iwl_cfg iwl_cfg_snj_a0_mr_a0 = {
     .fwname = "iwlwifi-SoSnj-a0-mr-a0-63.ucode",
     .uhb_supported = 1,
@@ -12355,6 +12376,9 @@ static const struct pci_matchid iwx_devices[] = {
     /* Ma devices */
     {IWL_PCI_DEVICE(0x2729, PCI_ANY_ID, iwl_ma_trans_cfg)},
     {IWL_PCI_DEVICE(0x7E40, PCI_ANY_ID, iwl_ma_trans_cfg)},
+
+    /* Gl devices (Intel Wi-Fi 7 BE200 / BE202, discrete) */
+    {IWL_PCI_DEVICE(0x272B, PCI_ANY_ID, iwl_gl_trans_cfg)},
 };
 
 struct iwl_dev_info {
@@ -12417,6 +12441,8 @@ const char iwl_ax221_name[] = "Intel(R) Wi-Fi 6E AX221 160MHz";
 const char iwl_ax231_name[] = "Intel(R) Wi-Fi 6E AX231 160MHz";
 const char iwl_ax411_name[] = "Intel(R) Wi-Fi 6E AX411 160MHz";
 const char iwl_bz_name[] = "Intel(R) TBD Bz device";
+const char iwl_gl_name[] = "Intel(R) Wi-Fi 7 BE200 320MHz";
+const char iwl_mtp_name[] = "Intel(R) Wi-Fi 7 BE202 160MHz";
 
 const char iwl_ax200_killer_1650w_name[] =
     "Killer(R) Wi-Fi 6 AX1650w 160MHz Wireless Network Adapter (200D2W)";
@@ -13156,6 +13182,14 @@ static const struct iwl_dev_info iwl_dev_info_table[] = {
                   IWL_CFG_RF_TYPE_FM, IWL_CFG_ANY,
                   IWL_CFG_ANY, IWL_CFG_ANY, IWL_CFG_NO_CDB,
                   iwl_cfg_ma_a0_fm_a0, iwl_ax231_name),
+
+    /* Gl: BE200 (and BE202, which only differs in bandwidth; we can't tell
+     * them apart yet without the 320 MHz flag Linux derives from the subdevice) */
+    _IWL_DEV_INFO(IWL_CFG_ANY, IWL_CFG_ANY,
+                  IWL_CFG_MAC_TYPE_GL, IWL_CFG_ANY,
+                  IWL_CFG_RF_TYPE_FM, IWL_CFG_ANY,
+                  IWL_CFG_ANY, IWL_CFG_ANY, IWL_CFG_NO_CDB,
+                  iwl_cfg_gl, iwl_gl_name),
     _IWL_DEV_INFO(IWL_CFG_ANY, IWL_CFG_ANY,
                   IWL_CFG_MAC_TYPE_SNJ, IWL_CFG_ANY,
                   IWL_CFG_RF_TYPE_MR, IWL_CFG_ANY,

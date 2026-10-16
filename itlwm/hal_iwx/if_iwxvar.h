@@ -125,6 +125,7 @@
 #define IWL_CFG_MAC_TYPE_SOF        0x43
 #define IWL_CFG_MAC_TYPE_MA        0x44
 #define IWL_CFG_MAC_TYPE_BZ        0x46
+#define IWL_CFG_MAC_TYPE_GL        0x47
 
 #define IWL_CFG_RF_TYPE_TH        0x105
 #define IWL_CFG_RF_TYPE_TH1        0x108
@@ -481,6 +482,7 @@ struct iwl_cfg_trans_params {
     int ltr_delay;
     int xtal_latency;
     int bisr_workaround;
+    uint32_t umac_prph_offset;  /* Bz+: UMAC PRPH window offset (Linux trans.umac_prph_offset) */
 };
 
 struct iwl_cfg {
@@ -652,6 +654,7 @@ struct iwx_softc {
 	int sc_device_family;
 #define IWX_DEVICE_FAMILY_22000	1
 #define IWX_DEVICE_FAMILY_AX210	2
+#define IWX_DEVICE_FAMILY_BZ	3	/* Bz / Gl (BE200, BE202): gen3 ctxt-info, MSI-X only */
 
 	struct iwx_dma_info ctxt_info_dma;
 	struct iwx_self_init_dram init_dram;
