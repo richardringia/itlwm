@@ -3696,6 +3696,33 @@ struct iwx_sec_key_cmd {
     } __packed u;
 } __packed; /* SEC_KEY_CMD_API_S_VER_1 */
 
+/* RX_BAID_ALLOCATION_CONFIG_CMD (DATA_PATH_GROUP 0x16) v2; response = __le32 baid */
+#define IWX_RX_BAID_ALLOCATION_CONFIG_CMD   0x16
+#define IWX_RX_BAID_ACTION_ADD      0
+#define IWX_RX_BAID_ACTION_REMOVE   2
+struct iwx_rx_baid_cfg_cmd {
+    uint32_t action;
+    union {
+        struct {
+            uint32_t sta_id_mask;
+            uint8_t tid;
+            uint8_t reserved[3];
+            uint16_t ssn;
+            uint16_t win_size;
+        } __packed alloc;
+        struct {
+            uint32_t old_sta_id_mask;
+            uint32_t new_sta_id_mask;
+            uint32_t tid;
+        } __packed modify;
+        struct {
+            uint32_t sta_id_mask;
+            uint32_t tid;
+        } __packed remove;
+    } __packed u;
+} __packed; /* RX_BAID_ALLOCATION_CONFIG_CMD_API_S_VER_2 */
+
+static_assert(sizeof(struct iwx_rx_baid_cfg_cmd) == 16, "RX_BAID_ALLOCATION v2 ABI");
 static_assert(sizeof(struct iwx_mac_config_cmd) == 52, "MAC_CONFIG v2 ABI");
 static_assert(sizeof(struct iwx_link_config_cmd) == 208, "LINK_CONFIG v2 ABI");
 static_assert(sizeof(struct iwx_sta_cfg_cmd) == 96, "STA_CONFIG v1 ABI");

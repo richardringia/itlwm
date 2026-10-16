@@ -205,6 +205,7 @@ public:
     int        iwx_mld_sta_cmd(struct iwx_softc *, struct iwx_node *);
     int        iwx_mld_txq_remove(struct iwx_softc *, int);
     int        iwx_mld_rm_sta_cmd(struct iwx_softc *);
+    int        iwx_mld_baid_cmd(struct iwx_softc *, uint8_t, uint16_t, uint16_t, int, uint32_t *);
     int        iwx_mld_set_key(struct iwx_softc *, struct ieee80211_node *, struct ieee80211_key *, int);
     uint32_t    iwx_lmac_id(struct iwx_softc *, ieee80211_channel *);
     int    iwx_store_cscheme(struct iwx_softc *, uint8_t *, size_t);

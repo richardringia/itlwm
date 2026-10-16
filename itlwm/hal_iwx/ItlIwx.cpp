@@ -3660,6 +3660,17 @@ iwx_tvqm_alloc_txq(struct iwx_softc *sc, int tid, int ssn)
     int size = IWX_DEFAULT_QUEUE_SIZE;
 #endif
     
+    /*
+     * MLD firmware keeps a TID queue until it is removed (Linux keeps one
+     * per TID for the station's lifetime); re-adding sta/tid would clash.
+     */
+    if (iwx_has_new_station_api(sc) && tid < IWX_MAX_TID_COUNT &&
+        sc->sc_mld_tid_qid[tid] != IWX_INVALID_QUEUE) {
+        sc->sc_tid_data[tid].qid = sc->sc_mld_tid_qid[tid];
+        XYLog("MLD reuse agg queue %d for tid %d\n", sc->sc_mld_tid_qid[tid], tid);
+        return sc->sc_mld_tid_qid[tid];
+    }
+    
     do {
         queue = iwx_tvqm_enable_txq(sc, tid, ssn, size);
         if (generation != sc->sc_generation)
@@ -3677,6 +3688,8 @@ iwx_tvqm_alloc_txq(struct iwx_softc *sc, int tid, int ssn)
     if (queue < 0)
         return queue;
     sc->sc_tid_data[tid].qid = queue;
+    if (iwx_has_new_station_api(sc) && tid < IWX_MAX_TID_COUNT)
+        sc->sc_mld_tid_qid[tid] = queue;
     return queue;
 }
 
@@ -4510,8 +4523,11 @@ iwx_sta_rx_agg(struct iwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
     IWX_STA_MODIFY_REMOVE_BA_TID;
     
     status = IWX_ADD_STA_SUCCESS;
-    err = iwx_send_cmd_pdu_status(sc, IWX_ADD_STA, sizeof(cmd), &cmd,
-                                  &status);
+    if (iwx_has_new_station_api(sc))
+        err = iwx_mld_baid_cmd(sc, tid, ssn, winsize, start, &status);
+    else
+        err = iwx_send_cmd_pdu_status(sc, IWX_ADD_STA, sizeof(cmd), &cmd,
+                                      &status);
     
     if (generation != sc->sc_generation) {
         splx(s);
@@ -4838,7 +4854,7 @@ iwx_ampdu_rx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
     ItlIwx *that = container_of(sc, ItlIwx, com);
     
     if (sc->sc_rx_ba_sessions >= IWX_MAX_RX_BA_SESSIONS ||
-        tid >= IWX_MAX_TID_COUNT || that->iwx_has_new_station_api(sc))
+        tid >= IWX_MAX_TID_COUNT)
         return ENOSPC;
     
     if (ic->ic_state != IEEE80211_S_RUN)
@@ -4883,7 +4899,7 @@ iwx_ampdu_tx_start(struct ieee80211com *ic, struct ieee80211_node *ni, uint8_t t
 
     XYLog("%s tid=%d ssn=%d\n", __FUNCTION__, tid, ba->ba_winstart);
 
-    if (tid < 0 || tid >= IWX_MAX_TID_COUNT || that->iwx_has_new_station_api(sc)) {
+    if (tid < 0 || tid >= IWX_MAX_TID_COUNT) {
         XYLog("%s tx agg refused. tid=%d\n", __FUNCTION__, tid);
         return ENOSPC;
     }
@@ -10174,6 +10190,15 @@ iwx_mld_rm_sta_cmd(struct iwx_softc *sc)
     int err;
 
     /* Linux removes the station's queues before the station */
+    for (int tid = 0; tid < IWX_MAX_TID_COUNT; tid++) {
+        int qid = sc->sc_mld_tid_qid[tid];
+        if (qid == IWX_INVALID_QUEUE)
+            continue;
+        iwx_mld_txq_remove(sc, tid);
+        iwx_reset_tx_ring(sc, &sc->txq[qid]);
+        sc->sc_mld_tid_qid[tid] = IWX_INVALID_QUEUE;
+        sc->sc_tid_data[tid].qid = IWX_INVALID_QUEUE;
+    }
     if (sc->sc_mld_mgmt_qid != IWX_INVALID_QUEUE) {
         iwx_mld_txq_remove(sc, IWX_MGMT_TID);
         iwx_reset_tx_ring(sc, &sc->txq[sc->sc_mld_mgmt_qid]);
@@ -10184,6 +10209,47 @@ iwx_mld_rm_sta_cmd(struct iwx_softc *sc)
     XYLog("MLD STA_REMOVE -> %d\n", err);
     sc->sc_flags &= ~IWX_FLAG_STA_ACTIVE;
     return err;
+}
+
+/*
+ * RX BA session via RX_BAID_ALLOCATION_CONFIG_CMD (Linux iwl_mvm_fw_baid_op_cmd).
+ * Returns the BAID encoded like an ADD_STA status so iwx_sta_rx_agg() can
+ * share the reorder-buffer setup with the legacy path.
+ */
+int ItlIwx::
+iwx_mld_baid_cmd(struct iwx_softc *sc, uint8_t tid, uint16_t ssn,
+                 uint16_t winsize, int start, uint32_t *status)
+{
+    struct iwx_rx_baid_cfg_cmd cmd;
+    uint32_t baid = 0;
+    int err;
+
+    memset(&cmd, 0, sizeof(cmd));
+    if (start) {
+        cmd.action = htole32(IWX_RX_BAID_ACTION_ADD);
+        cmd.u.alloc.sta_id_mask = htole32(IWX_MLD_STA_MASK);
+        cmd.u.alloc.tid = tid;
+        cmd.u.alloc.ssn = htole16(ssn);
+        cmd.u.alloc.win_size = htole16(winsize);
+    } else {
+        cmd.action = htole32(IWX_RX_BAID_ACTION_REMOVE);
+        cmd.u.remove.sta_id_mask = htole32(IWX_MLD_STA_MASK);
+        cmd.u.remove.tid = htole32(tid);
+    }
+    err = iwx_send_cmd_pdu_status(sc, iwx_cmd_id(IWX_RX_BAID_ALLOCATION_CONFIG_CMD,
+                                  IWX_DATA_PATH_GROUP, 0), sizeof(cmd), &cmd, &baid);
+    XYLog("MLD RX_BAID %s tid=%d ssn=%d win=%d -> err %d baid %u\n",
+          start ? "add" : "remove", tid, ssn, winsize, err, baid);
+    if (err)
+        return err;
+    *status = IWX_ADD_STA_SUCCESS;
+    if (start) {
+        if (baid >= IWX_MAX_BAID)
+            return EIO;
+        *status |= IWX_ADD_STA_BAID_VALID_MASK |
+            ((baid << IWX_ADD_STA_BAID_SHIFT) & IWX_ADD_STA_BAID_MASK);
+    }
+    return 0;
 }
 
 int ItlIwx::
@@ -11351,6 +11417,8 @@ iwx_init(struct _ifnet *ifp)
         sc->sc_tid_data[i].qid = IWX_INVALID_QUEUE;
     }
     sc->sc_mld_mgmt_qid = IWX_INVALID_QUEUE;
+    for (i = 0; i < IWX_MAX_TID_COUNT; i++)
+        sc->sc_mld_tid_qid[i] = IWX_INVALID_QUEUE;
     
     //    rw_assert_wrlock(&sc->ioctl_rwl);
     

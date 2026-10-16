@@ -689,6 +689,7 @@ struct iwx_softc {
 	int n_cmd_versions;
 	uint64_t sc_scan_start_abs;	/* BE200 bring-up: scan duration logging */
 	int sc_mld_mgmt_qid;		/* MLD: firmware-assigned mgmt/data queue */
+	int sc_mld_tid_qid[IWX_MAX_TID_COUNT];	/* MLD: per-TID agg queues, live until STA_REMOVE */
     char sc_fw_mcc[3];
     uint16_t sc_fw_mcc_int;
 #define IWX_IML_MAX_LEN 2048*10
