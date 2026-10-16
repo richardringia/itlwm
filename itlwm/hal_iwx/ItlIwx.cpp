@@ -12016,11 +12016,30 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             }
                 
             default:
-                handled = 0;
+                /*
+                 * A direct response to a host command (bit 7 of qid clear)
+                 * must complete that command even if we don't parse it,
+                 * like Linux does; otherwise every new MLD command (RLC,
+                 * MAC/LINK/STA_CONFIG, ...) times out with EAGAIN.
+                 */
+                handled = !(qid & (1 << 7));
+                if (handled && qid == IWX_DQA_CMD_QUEUE &&
+                    idx < sc->txq[IWX_DQA_CMD_QUEUE].ring_count &&
+                    (sc->txq[IWX_DQA_CMD_QUEUE].data[idx].flags & IWX_TXDATA_FLAG_CMD_PENDING) &&
+                    sc->sc_cmd_resp_pkt[idx] != NULL) {
+                    size_t rlen = sizeof(pkt->len_n_flags) + iwx_rx_packet_len(pkt);
+                    if (!(pkt->hdr.group_id & IWX_CMD_FAILED_MSK) &&
+                        rlen >= sizeof(*pkt) && rlen <= sc->sc_cmd_resp_len[idx])
+                        memcpy(sc->sc_cmd_resp_pkt[idx], pkt, rlen);
+                    else {
+                        ::free(sc->sc_cmd_resp_pkt[idx]);
+                        sc->sc_cmd_resp_pkt[idx] = NULL;
+                    }
+                }
                 XYLog("%s: unhandled firmware response 0x%x/0x%x "
-                      "rx ring %d[%d]\n",
+                      "rx ring %d[%d]%s\n",
                       DEVNAME(sc), code, pkt->len_n_flags,
-                      (qid & ~0x80), idx);
+                      (qid & ~0x80), idx, handled ? " (cmd resp)" : " (notif)");
                 break;
         }
         
