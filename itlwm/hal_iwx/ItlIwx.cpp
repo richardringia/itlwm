@@ -4004,6 +4004,8 @@ iwx_schedule_protect_session(struct iwx_softc *sc, struct iwx_node *in,
         cmd.duration_tu = htole32(900 * 1000 / 1024);
         XYLog("MLD SESSION_PROTECTION add link 0, %u TU\n", le32toh(cmd.duration_tu));
     }
+    if (iwx_has_new_station_api(sc))
+        sc->sc_flags |= IWX_FLAG_TE_ACTIVE;   /* cleared by SESSION_PROTECTION_NOTIF end */
     
     DPRINTFN(1, ("Add new session protection, duration %d TU\n",
              htole32(cmd.duration_tu)));
@@ -4025,8 +4027,13 @@ iwx_cancel_session_protection(struct iwx_softc *sc, struct iwx_node *in)
     };
     int err;
     
-    if (iwx_has_new_station_api(sc))
+    if (iwx_has_new_station_api(sc)) {
+        /* firmware already ended it (e.g. once associated): nothing to cancel */
+        if (!(sc->sc_flags & IWX_FLAG_TE_ACTIVE))
+            return 0;
+        sc->sc_flags &= ~IWX_FLAG_TE_ACTIVE;
         cmd.id_and_color = htole32(0);
+    }
     
     DPRINTFN(1, ("Remove session protection\n"));
     
@@ -6465,6 +6472,12 @@ iwx_rx_bmiss(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                             IEEE80211_FC0_SUBTYPE_PROBE_REQ, 0);
     }
     
+    /* Notification v3 and v4 share these two offsets. */
+    if (le32toh(mbn->consec_missed_beacons) >= 19 && missed >= 4) {
+        XYLog("%s: beacon loss (%u missed, %u since rx), connection lost\n",
+              DEVNAME(sc), le32toh(mbn->consec_missed_beacons), missed);
+        ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
+    }
 }
 
 int ItlIwx::
@@ -9315,6 +9328,11 @@ iwx_enable_mgmt_queue(struct iwx_softc *sc)
     int cmdver;
 
     if (iwx_has_new_station_api(sc)) {
+        /* AUTH -> AUTH retry: the station's tid-15 queue still exists */
+        if (sc->sc_mld_mgmt_qid != IWX_INVALID_QUEUE) {
+            sc->first_data_qid = sc->sc_mld_mgmt_qid;
+            return 0;
+        }
         /* MLD: firmware picks the queue (Linux iwl_mvm_tvqm_enable_txq, tid 15) */
         int qid = iwx_tvqm_enable_txq(sc, IWX_MGMT_TID, 0, IWX_DEFAULT_QUEUE_SIZE);
         if (qid < 0) {
