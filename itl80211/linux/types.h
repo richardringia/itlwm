@@ -114,12 +114,13 @@
  * kprintf only reaches a serial console; IOLog lands in the kernel message
  * buffer and the unified log (`log show --predicate 'process == "kernel"'`),
  * which is what we can actually read on a hackintosh. Emit both.
+ * The prefix must be literal: os_log redacts %s arguments to <private>.
  */
 #define XYLog(fmt, x...)\
 do\
 {\
-kprintf("%s: " fmt, "itlwm", ##x);\
-IOLog("%s: " fmt, "itlwm", ##x);\
+kprintf("itlwm: " fmt, ##x);\
+IOLog("itlwm: " fmt, ##x);\
 }while(0)
 
 typedef UInt8  u8;
