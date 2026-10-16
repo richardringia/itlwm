@@ -8762,9 +8762,12 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
     general_params->suspend_time[IWX_SCAN_LB_LMAC_IDX] =
         timeout;
     
-    /* Linux iwl_mvm_scan_umac_dwell_v11 always fills the HB LMAC too */
-    if (isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_CDB_SUPPORT) ||
-        sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ) {
+    /*
+     * HB LMAC timing only with CDB. Without CDB Linux leaves hb_type
+     * NOT_SET, i.e. 0/0; filling it on Bz asserted the firmware on the
+     * first background scan after association (t17: 0x20103604, SCAN_REQ).
+     */
+    if (isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_CDB_SUPPORT)) {
         general_params->max_out_of_time[IWX_SCAN_HB_LMAC_IDX] = maxOut;
         general_params->suspend_time[IWX_SCAN_HB_LMAC_IDX] = timeout;
     }
