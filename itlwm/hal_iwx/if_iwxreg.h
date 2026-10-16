@@ -583,6 +583,13 @@ enum iwx_fw_ini_allocation_id {
 #define IWX_CSR_GPIO_IN             (0x018) /* read external chip pins */
 #define IWX_CSR_RESET               (0x020) /* busmaster enable, NMI, etc*/
 #define IWX_CSR_GP_CNTRL            (0x024)
+#define IWX_CSR_FUNC_SCRATCH        (0x02c) /* Bz+: scratch, written before ROM start; 0 after power loss */
+#define IWX_CSR_FUNC_SCRATCH_INIT_VALUE (0x01010101)
+#define IWX_CSR_IPC_SLEEP_CONTROL   (0x114) /* Bz+: D3 handshake (replaces DOORBELL_TO_ISR6 SUSPEND/RESUME) */
+#define IWX_CSR_IPC_SLEEP_CONTROL_SUSPEND 0x3
+#define IWX_CSR_IPC_SLEEP_CONTROL_RESUME  0
+#define IWX_CSR_DOORBELL_VECTOR     (0x130) /* Bz+: NMI doorbell (replaces umac prph DOORBELL_TO_ISR6) */
+#define IWX_CSR_LTR_LAST_MSG        (0x0DC) /* last LTR message sent; read in a loop to keep the bus busy during IML load */
 
 /* 2nd byte of IWX_CSR_INT_COALESCING, not accessible via iwl_write32()! */
 #define IWX_CSR_INT_PERIODIC_REG    (0x005)
@@ -763,8 +770,18 @@ enum iwx_fw_ini_allocation_id {
 #define IWX_CSR_GP_CNTRL_REG_FLAG_INIT_DONE              (0x00000004)
 #define IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ         (0x00000008)
 #define IWX_CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP         (0x00000010)
-/* Bz+ moved the MAC access request bit (Linux CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ) */
-#define IWX_CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ      (0x00200000)
+/*
+ * Bz+ (BE200) GP_CNTRL layout: MAC init/status/access/reset all moved here,
+ * replacing INIT_DONE / MAC_CLOCK_READY / MAC_ACCESS_REQ / CSR_RESET flags.
+ * Values from Linux iwl-csr.h.
+ */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_MAC_INIT               (0x00000040)  /* bit 6, replaces INIT_DONE */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_ROM_START              (0x00000080)  /* bit 7, replaces UREG_CPU_INIT_RUN */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_MAC_STATUS             (0x00100000)  /* bit 20, replaces MAC_CLOCK_READY poll */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ      (0x00200000)  /* bit 21, replaces MAC_ACCESS_REQ */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_BUS_MASTER_DISABLE_STATUS (0x10000000) /* bit 28 */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_BUS_MASTER_DISABLE_REQ (0x20000000)  /* bit 29, replaces CSR_RESET STOP_MASTER */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_SW_RESET               (0x80000000)  /* bit 31, replaces CSR_RESET SW_RESET */
 
 #define IWX_CSR_GP_CNTRL_REG_VAL_MAC_ACCESS_EN           (0x00000001)
 
@@ -1103,6 +1120,9 @@ enum iwx_fw_ini_allocation_id {
  * 11-8:  queue selector
  */
 #define IWX_HBUS_TARG_WRPTR         (IWX_HBUS_BASE+0x060)
+/* Bz+: RX queue write pointers go through HBUS_TARG_WRPTR, queue id in the upper half */
+#define IWX_HBUS_TARG_WRPTR_Q_SHIFT (16)
+#define IWX_HBUS_TARG_WRPTR_RX_Q(q) (((q) + 512) << IWX_HBUS_TARG_WRPTR_Q_SHIFT)
 
 /**********************************************************
  * CSR values
@@ -1154,8 +1174,10 @@ enum iwx_msix_hw_int_causes {
     IWX_MSIX_HW_INT_CAUSES_REG_ALIVE    = (1 << 0),
     IWX_MSIX_HW_INT_CAUSES_REG_WAKEUP    = (1 << 1),
     IWX_MSIX_HW_INT_CAUSES_REG_IPC        = (1 << 1),
-    IWX_MSIX_HW_INT_CAUSES_REG_IML        = (1 << 2),
-    IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_V2    = (1 << 5),
+    IWX_MSIX_HW_INT_CAUSES_REG_IML        = (1 << 1),  /* shares bit 1 with WAKEUP (Linux); bit 2 is RESET_DONE */
+    IWX_MSIX_HW_INT_CAUSES_REG_RESET_DONE    = (1 << 2),
+    IWX_MSIX_HW_INT_CAUSES_REG_TOP_FATAL_ERR    = (1 << 3),
+    IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_V2    = (1 << 5),  /* == Linux SW_ERR_BZ */
     IWX_MSIX_HW_INT_CAUSES_REG_CT_KILL    = (1 << 6),
     IWX_MSIX_HW_INT_CAUSES_REG_RF_KILL    = (1 << 7),
     IWX_MSIX_HW_INT_CAUSES_REG_PERIODIC    = (1 << 8),
@@ -1176,7 +1198,10 @@ enum iwx_msix_ivar_for_cause {
     IWX_MSIX_IVAR_CAUSE_FH_ERR        = 0x5,
     IWX_MSIX_IVAR_CAUSE_REG_ALIVE        = 0x10,
     IWX_MSIX_IVAR_CAUSE_REG_WAKEUP        = 0x11,
-    IWX_MSIX_IVAR_CAUSE_REG_IML        = 0x12,
+    IWX_MSIX_IVAR_CAUSE_REG_IML        = 0x11,  /* IVAR index = 16 + cause bit; IML is bit 1 */
+    IWX_MSIX_IVAR_CAUSE_REG_RESET_DONE    = 0x12,
+    IWX_MSIX_IVAR_CAUSE_REG_TOP_FATAL_ERR    = 0x13,
+    IWX_MSIX_IVAR_CAUSE_REG_SW_ERR_BZ    = 0x15,
     IWX_MSIX_IVAR_CAUSE_REG_CT_KILL        = 0x16,
     IWX_MSIX_IVAR_CAUSE_REG_RF_KILL        = 0x17,
     IWX_MSIX_IVAR_CAUSE_REG_PERIODIC    = 0x18,
@@ -1669,6 +1694,14 @@ struct iwx_rb_status {
  * @flags: flags (0: fragmented, all others: reserved)
  * @reserved2: reserved
  */
+/* Bz+: 4-byte RX completion ("used BD") entry (Linux iwl_rx_completion_desc_bz). */
+struct iwx_rx_completion_desc_bz {
+    uint16_t rbid;
+    uint8_t flags;
+#define IWX_RX_CD_FLAGS_FRAGMENTED (1 << 0)
+    uint8_t reserved[1];
+} __packed;
+
 struct iwx_rx_completion_desc {
     uint32_t reserved1;
     uint16_t rbid;
@@ -1685,6 +1718,7 @@ struct iwx_rx_completion_desc {
 #define IWX_TFD_QUEUE_BC_SIZE        (IWX_TFD_QUEUE_SIZE_MAX + \
                     IWX_TFD_QUEUE_SIZE_BC_DUP)
 #define IWX_TFD_QUEUE_BC_SIZE_GEN3    1024
+#define IWX_TFD_QUEUE_BC_SIZE_GEN3_BZ (1024 * 4)  /* Bz+: 4096-entry byte-count table */
 #define IWX_TFH_NUM_TBS        25
 
 /**

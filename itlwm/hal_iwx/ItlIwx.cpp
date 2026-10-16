@@ -1251,14 +1251,45 @@ iwx_ctxt_info_gen3_init(struct iwx_softc *sc, const struct iwx_fw_sects *fws)
             IWX_CSR_AUTO_FUNC_BOOT_ENA);
     
     iwx_set_ltr(sc);
-    
-    if (!iwx_nic_lock(sc))
-        return EBUSY;
-    iwx_write_umac_prph(sc, IWX_UREG_CPU_INIT_RUN, 1);
-    iwx_nic_unlock(sc);
-    
+
+    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ) {
+        /*
+         * Linux iwl_trans_pcie_gen2_start_fw, Bz variant: no UREG_CPU_INIT_RUN,
+         * instead mark the scratch register and kick the ROM via GP_CNTRL.
+         */
+        XYLog("%s: CSR_FUNC_SCRATCH before start: 0x%08x\n", DEVNAME(sc),
+              IWX_READ(sc, IWX_CSR_FUNC_SCRATCH));
+        IWX_WRITE(sc, IWX_CSR_FUNC_SCRATCH, IWX_CSR_FUNC_SCRATCH_INIT_VALUE);
+        IWX_SETBITS(sc, IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_ROM_START);
+
+        /*
+         * Keep the CPU and device busy until the IML has loaded
+         * (Linux iwl_pcie_spin_for_iml; ~20-30 ms in practice, 100 ms cap).
+         * A timeout is not fatal: the ALIVE wait will report the real error.
+         */
+        uint32_t ltr = IWX_READ(sc, IWX_CSR_LTR_LAST_MSG), loops = 0;
+        int got_iml = 0;
+        for (int t = 0; t < 100000; t += 10) {
+            if (IWX_READ(sc, IWX_CSR_MSIX_HW_INT_CAUSES_AD) &
+                IWX_MSIX_HW_INT_CAUSES_REG_IML) {
+                got_iml = 1;
+                break;
+            }
+            ltr = IWX_READ(sc, IWX_CSR_LTR_LAST_MSG);
+            loops++;
+            DELAY(10);
+        }
+        XYLog("%s: IML load: irq=%d loops=%u CSR_LTR_LAST_MSG=0x%08x\n",
+              DEVNAME(sc), got_iml, loops, ltr);
+    } else {
+        if (!iwx_nic_lock(sc))
+            return EBUSY;
+        iwx_write_umac_prph(sc, IWX_UREG_CPU_INIT_RUN, 1);
+        iwx_nic_unlock(sc);
+    }
+
     return 0;
-    
+
 fail1:
     iwx_dma_contig_free(&sc->iml_dma);
 fail0:
@@ -2316,15 +2347,23 @@ iwx_nic_lock(struct iwx_softc *sc)
         return 1; /* already locked */
     }
     
-    IWX_SETBITS(sc, IWX_CSR_GP_CNTRL,
-                IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
-    
+    uint32_t write, poll, mask;
+    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ) {
+        /* Linux __iwl_trans_pcie_grab_nic_access, Bz variant */
+        write = IWX_CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ;
+        poll = mask = IWX_CSR_GP_CNTRL_REG_FLAG_MAC_STATUS;
+    } else {
+        write = IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ;
+        poll = IWX_CSR_GP_CNTRL_REG_VAL_MAC_ACCESS_EN;
+        mask = IWX_CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY
+             | IWX_CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP;
+    }
+
+    IWX_SETBITS(sc, IWX_CSR_GP_CNTRL, write);
+
     DELAY(2);
-    
-    if (iwx_poll_bit(sc, IWX_CSR_GP_CNTRL,
-                     IWX_CSR_GP_CNTRL_REG_VAL_MAC_ACCESS_EN,
-                     IWX_CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY
-                     | IWX_CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP, 150000)) {
+
+    if (iwx_poll_bit(sc, IWX_CSR_GP_CNTRL, poll, mask, 150000)) {
         sc->sc_nic_locks++;
         return 1;
     }
@@ -2346,6 +2385,8 @@ iwx_nic_unlock(struct iwx_softc *sc)
     if (sc->sc_nic_locks > 0) {
         if (--sc->sc_nic_locks == 0)
             IWX_CLRBITS(sc, IWX_CSR_GP_CNTRL,
+                        sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ ?
+                        IWX_CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ :
                         IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
     } else
         XYLog("%s: NIC already unlocked\n", DEVNAME(sc));
@@ -2514,7 +2555,9 @@ iwx_alloc_rx_ring(struct iwx_softc *sc, struct iwx_rx_ring *ring)
     }
     ring->stat = ring->stat_dma.vaddr;
     
-    size = IWX_RX_MQ_RING_COUNT * (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210 ? sizeof(struct iwx_rx_completion_desc) : sizeof(uint32_t));
+    /* Used-BD (RX completion) entry: 4 B on Bz, 32 B on AX210, 4 B (u32) before */
+    size = IWX_RX_MQ_RING_COUNT * (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ ? sizeof(struct iwx_rx_completion_desc_bz) :
+                                   sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210 ? sizeof(struct iwx_rx_completion_desc) : sizeof(uint32_t));
     err = iwx_dma_contig_alloc(sc->sc_dmat, &ring->used_desc_dma,
                                size, 256);
     if (err) {
@@ -2671,7 +2714,11 @@ iwx_alloc_tx_ring(struct iwx_softc *sc, struct iwx_tx_ring *ring, int qid)
     }
     ring->desc = (struct iwx_tfh_tfd*)ring->desc_dma.vaddr;
 
-    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210)
+    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ)
+        /* Bz: 4096 gen3 byte-count entries (Linux TFD_QUEUE_BC_SIZE_GEN3_BZ) */
+        err = iwx_dma_contig_alloc(sc->sc_dmat, &ring->bc_tbl,
+                                   sizeof(uint16_t) * IWX_TFD_QUEUE_BC_SIZE_GEN3_BZ, 0);
+    else if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210)
         err = iwx_dma_contig_alloc(sc->sc_dmat, &ring->bc_tbl,
                                    sizeof(struct iwx_gen3_bc_tbl), 0);
     else
@@ -3044,26 +3091,15 @@ iwx_apm_init(struct iwx_softc *sc)
                 IWX_CSR_HW_IF_CONFIG_REG_BIT_HAP_WAKE_L1A);
     
     iwx_apm_config(sc);
-    
+
     /*
      * Set "initialization complete" bit to move adapter from
-     * D0U* --> D0A* (powered-up active) state.
+     * D0U* --> D0A* (powered-up active) state and wait for clock
+     * stabilization (Bz: MAC_INIT / MAC_STATUS instead).
      */
-    IWX_SETBITS(sc, IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_INIT_DONE);
-    
-    /*
-     * Wait for clock stabilization; once stabilized, access to
-     * device-internal resources is supported, e.g. iwx_write_prph()
-     * and accesses to uCode SRAM.
-     */
-    if (!iwx_poll_bit(sc, IWX_CSR_GP_CNTRL,
-                      IWX_CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY,
-                      IWX_CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY, 25000)) {
-        XYLog("%s: timeout waiting for clock stabilization\n",
-              DEVNAME(sc));
-        err = ETIMEDOUT;
+    err = iwx_finish_nic_init(sc);
+    if (err)
         goto out;
-    }
 out:
     if (err)
         XYLog("%s: apm init error %d\n", DEVNAME(sc), err);
@@ -3084,19 +3120,77 @@ iwx_apm_stop(struct iwx_softc *sc)
     DELAY(5000);
     
     /* stop device's busmaster DMA activity */
-    IWX_SETBITS(sc, IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_STOP_MASTER);
-    
-    if (!iwx_poll_bit(sc, IWX_CSR_RESET,
-                      IWX_CSR_RESET_REG_FLAG_MASTER_DISABLED,
-                      IWX_CSR_RESET_REG_FLAG_MASTER_DISABLED, 100))
-        XYLog("%s: timeout waiting for master\n", DEVNAME(sc));
-    
+    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ) {
+        /* Linux iwl_pcie_apm_stop_master, Bz variant */
+        IWX_SETBITS(sc, IWX_CSR_GP_CNTRL,
+                    IWX_CSR_GP_CNTRL_REG_FLAG_BUS_MASTER_DISABLE_REQ);
+        if (!iwx_poll_bit(sc, IWX_CSR_GP_CNTRL,
+                          IWX_CSR_GP_CNTRL_REG_FLAG_BUS_MASTER_DISABLE_STATUS,
+                          IWX_CSR_GP_CNTRL_REG_FLAG_BUS_MASTER_DISABLE_STATUS, 100))
+            XYLog("%s: timeout waiting for master\n", DEVNAME(sc));
+        DELAY(20000);
+    } else {
+        IWX_SETBITS(sc, IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_STOP_MASTER);
+
+        if (!iwx_poll_bit(sc, IWX_CSR_RESET,
+                          IWX_CSR_RESET_REG_FLAG_MASTER_DISABLED,
+                          IWX_CSR_RESET_REG_FLAG_MASTER_DISABLED, 100))
+            XYLog("%s: timeout waiting for master\n", DEVNAME(sc));
+    }
+
     /*
      * Clear "initialization complete" bit to move adapter from
      * D0A* (powered-up Active) --> D0U* (Uninitialized) state.
      */
     IWX_CLRBITS(sc, IWX_CSR_GP_CNTRL,
+                sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ ?
+                IWX_CSR_GP_CNTRL_REG_FLAG_MAC_INIT :
                 IWX_CSR_GP_CNTRL_REG_FLAG_INIT_DONE);
+}
+
+/*
+ * Software reset of the whole device. Bz moved the reset bit from CSR_RESET
+ * into GP_CNTRL and needs a longer settle time (Linux iwl_trans_pcie_sw_reset).
+ */
+void ItlIwx::
+iwx_sw_reset(struct iwx_softc *sc)
+{
+    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ) {
+        IWX_SETBITS(sc, IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_SW_RESET);
+        DELAY(20000);
+    } else {
+        IWX_SETBITS(sc, IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_SW_RESET);
+        DELAY(5000);
+    }
+}
+
+/*
+ * Move the adapter to D0A and wait for the MAC clock
+ * (Linux iwl_finish_nic_init minus the MSI/MSI-X chicken bit, which
+ * iwx_conf_msix_hw sets). Returns 0 or ETIMEDOUT.
+ */
+int ItlIwx::
+iwx_finish_nic_init(struct iwx_softc *sc)
+{
+    uint32_t set, poll;
+
+    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ) {
+        set = IWX_CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ |
+              IWX_CSR_GP_CNTRL_REG_FLAG_MAC_INIT;
+        poll = IWX_CSR_GP_CNTRL_REG_FLAG_MAC_STATUS;
+    } else {
+        set = IWX_CSR_GP_CNTRL_REG_FLAG_INIT_DONE;
+        poll = IWX_CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY;
+    }
+
+    IWX_SETBITS(sc, IWX_CSR_GP_CNTRL, set);
+    DELAY(20);
+
+    if (!iwx_poll_bit(sc, IWX_CSR_GP_CNTRL, poll, poll, 25000)) {
+        XYLog("%s: timeout waiting for clock stabilization\n", DEVNAME(sc));
+        return ETIMEDOUT;
+    }
+    return 0;
 }
 
 void ItlIwx::
@@ -3169,7 +3263,14 @@ iwx_conf_msix_hw(struct iwx_softc *sc, int stopped)
                 vector | IWX_MSIX_NON_AUTO_CLEAR_CAUSE);
     IWX_WRITE_1(sc, IWX_CSR_MSIX_IVAR(IWX_MSIX_IVAR_CAUSE_REG_PERIODIC),
                 vector | IWX_MSIX_NON_AUTO_CLEAR_CAUSE);
-    IWX_WRITE_1(sc, IWX_CSR_MSIX_IVAR(IWX_MSIX_IVAR_CAUSE_REG_SW_ERR),
+    /* Bz reports firmware errors through SW_ERR_BZ (bit 5) instead of bit 25 */
+    IWX_WRITE_1(sc, IWX_CSR_MSIX_IVAR(sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ ?
+                                      IWX_MSIX_IVAR_CAUSE_REG_SW_ERR_BZ :
+                                      IWX_MSIX_IVAR_CAUSE_REG_SW_ERR),
+                vector | IWX_MSIX_NON_AUTO_CLEAR_CAUSE);
+    IWX_WRITE_1(sc, IWX_CSR_MSIX_IVAR(IWX_MSIX_IVAR_CAUSE_REG_RESET_DONE),
+                vector | IWX_MSIX_NON_AUTO_CLEAR_CAUSE);
+    IWX_WRITE_1(sc, IWX_CSR_MSIX_IVAR(IWX_MSIX_IVAR_CAUSE_REG_TOP_FATAL_ERR),
                 vector | IWX_MSIX_NON_AUTO_CLEAR_CAUSE);
     IWX_WRITE_1(sc, IWX_CSR_MSIX_IVAR(IWX_MSIX_IVAR_CAUSE_REG_SCD),
                 vector | IWX_MSIX_NON_AUTO_CLEAR_CAUSE);
@@ -3193,7 +3294,11 @@ iwx_conf_msix_hw(struct iwx_softc *sc, int stopped)
                 IWX_MSIX_HW_INT_CAUSES_REG_CT_KILL |
                 IWX_MSIX_HW_INT_CAUSES_REG_RF_KILL |
                 IWX_MSIX_HW_INT_CAUSES_REG_PERIODIC |
-                IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR |
+                IWX_MSIX_HW_INT_CAUSES_REG_RESET_DONE |
+                IWX_MSIX_HW_INT_CAUSES_REG_TOP_FATAL_ERR |
+                (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ ?
+                 IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_V2 :
+                 IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR) |
                 IWX_MSIX_HW_INT_CAUSES_REG_SCD |
                 IWX_MSIX_HW_INT_CAUSES_REG_FH_TX |
                 IWX_MSIX_HW_INT_CAUSES_REG_HW_ERR |
@@ -3218,8 +3323,7 @@ iwx_start_hw(struct iwx_softc *sc)
     iwx_clear_persistence_bit(sc);
     
     /* Reset the entire device */
-    IWX_SETBITS(sc, IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_SW_RESET);
-    DELAY(5000);
+    iwx_sw_reset(sc);
     
     if (sc->sc_device_family == IWX_DEVICE_FAMILY_22000 && sc->sc_integrated) {
         IWX_SETBITS(sc, IWX_CSR_GP_CNTRL,
@@ -3234,10 +3338,9 @@ iwx_start_hw(struct iwx_softc *sc)
         }
         
         iwx_force_power_gating(sc);
-        
+
         /* Reset the entire device */
-        IWX_SETBITS(sc, IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_SW_RESET);
-        DELAY(5000);
+        iwx_sw_reset(sc);
     }
     
     err = iwx_apm_init(sc);
@@ -3284,6 +3387,8 @@ iwx_stop_device(struct iwx_softc *sc)
     
     /* Make sure (redundant) we've released our request to stay awake */
     IWX_CLRBITS(sc, IWX_CSR_GP_CNTRL,
+                sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ ?
+                IWX_CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ :
                 IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
     if (sc->sc_nic_locks > 0)
         XYLog("%s: %d active NIC locks forcefully cleared\n",
@@ -3294,8 +3399,7 @@ iwx_stop_device(struct iwx_softc *sc)
     iwx_apm_stop(sc);
     
     /* Reset the on-board processor. */
-    IWX_SETBITS(sc, IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_SW_RESET);
-    DELAY(5000);
+    iwx_sw_reset(sc);
 #ifdef AIRPORT_VTD
     sc->sc_pcitag->setBusMasterEnable(false);
     iwx_reset_rx_ring(sc, &sc->rxq);
@@ -3572,7 +3676,11 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
         goto fail;
     }
     ring->desc = (struct iwx_tfh_tfd*)ring->desc_dma.vaddr;
-    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210)
+    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ)
+        /* Bz: 4096 gen3 byte-count entries (Linux TFD_QUEUE_BC_SIZE_GEN3_BZ) */
+        err = iwx_dma_contig_alloc(sc->sc_dmat, &ring->bc_tbl,
+                                   sizeof(uint16_t) * IWX_TFD_QUEUE_BC_SIZE_GEN3_BZ, 0);
+    else if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210)
         err = iwx_dma_contig_alloc(sc->sc_dmat, &ring->bc_tbl,
                                    sizeof(struct iwx_gen3_bc_tbl), 0);
     else
@@ -11852,7 +11960,10 @@ iwx_notif_intr(struct iwx_softc *sc)
      * Seems like the hardware gets upset unless we align the write by 8??
      */
     hw = (hw == 0) ? IWX_RX_MQ_RING_COUNT - 1 : hw - 1;
-    IWX_WRITE(sc, IWX_RFH_Q0_FRBDCB_WIDX_TRG, hw & ~7);
+    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ)
+        IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, (hw & ~7) | IWX_HBUS_TARG_WRPTR_RX_Q(0));
+    else
+        IWX_WRITE(sc, IWX_RFH_Q0_FRBDCB_WIDX_TRG, hw & ~7);
 }
 
 int ItlIwx::
@@ -11911,7 +12022,10 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
         /* Firmware has now configured the RFH. */
         for (i = 0; i < IWX_RX_MQ_RING_COUNT; i++)
             that->iwx_update_rx_desc(sc, &sc->rxq, i);
-        IWX_WRITE(sc, IWX_RFH_Q0_FRBDCB_WIDX_TRG, 8);
+        if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ)
+            IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, 8 | IWX_HBUS_TARG_WRPTR_RX_Q(0));
+        else
+            IWX_WRITE(sc, IWX_RFH_Q0_FRBDCB_WIDX_TRG, 8);
     }
     
     handled |= (r1 & (IWX_CSR_INT_BIT_ALIVE /*| IWX_CSR_INT_BIT_SCD*/));
@@ -12082,7 +12196,10 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
         /* Firmware has now configured the RFH. */
         for (i = 0; i < IWX_RX_MQ_RING_COUNT; i++)
             that->iwx_update_rx_desc(sc, &sc->rxq, i);
-        IWX_WRITE(sc, IWX_RFH_Q0_FRBDCB_WIDX_TRG, 8);
+        if (sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ)
+            IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, 8 | IWX_HBUS_TARG_WRPTR_RX_Q(0));
+        else
+            IWX_WRITE(sc, IWX_RFH_Q0_FRBDCB_WIDX_TRG, 8);
     }
     
     /*
@@ -13466,12 +13583,20 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         XYLog("%s: can't map mem space\n", DEVNAME(sc));
         return false;
     }
-    if (0) {
+    /*
+     * Bz/Gl (BE200) cannot operate in MSI mode (Linux iwlwifi only enables it
+     * via MSI-X), so request real MSI-X vectors for that family and fall back
+     * to MSI everywhere else, as before.
+     */
+    if (sc->sc_cfg_params && sc->sc_cfg_params->device_family >= IWX_DEVICE_FAMILY_BZ &&
+        pci_intr_map_msix(pa, 0, &sc->ih) == 0) {
         sc->sc_msix = 1;
-        XYLog("msix intr mode\n");
+        XYLog("%s: msix intr mode (index %d)\n", DEVNAME(sc), sc->ih->intr_index);
     } else if (pci_intr_map_msi(pa, &sc->ih)) {
         XYLog("%s: can't map interrupt\n", DEVNAME(sc));
         return false;
+    } else if (sc->sc_cfg_params && sc->sc_cfg_params->device_family >= IWX_DEVICE_FAMILY_BZ) {
+        XYLog("%s: WARNING: MSI-X unavailable, Bz devices do not work in MSI mode\n", DEVNAME(sc));
     }
     
     if (!sc->sc_msix) {
@@ -13484,21 +13609,24 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
             PCI_COMMAND_STATUS_REG, reg);
     }
     
-    int msiIntrIndex = -1;
-    for (int index = 0; ; index++)
-    {
-        int interruptType;
-        int ret = pa->pa_tag->getInterruptType(index, &interruptType);
-        if (ret != kIOReturnSuccess)
-            break;
-        if (interruptType & kIOInterruptTypePCIMessaged)
+    /* pci_intr_map_msi/msix already located the MSI (or MSI-X) interrupt index. */
+    int msiIntrIndex = sc->ih->intr_index;
+    if (msiIntrIndex == -1) {
+        for (int index = 0; ; index++)
         {
-            msiIntrIndex = index;
-            break;
+            int interruptType;
+            int ret = pa->pa_tag->getInterruptType(index, &interruptType);
+            if (ret != kIOReturnSuccess)
+                break;
+            if (interruptType & (sc->sc_msix ? kIOInterruptTypePCIMessagedX : kIOInterruptTypePCIMessaged))
+            {
+                msiIntrIndex = index;
+                break;
+            }
         }
     }
     if (msiIntrIndex == -1) {
-        XYLog("%s: can't find MSI interrupt controller\n", DEVNAME(sc));
+        XYLog("%s: can't find %s interrupt controller\n", DEVNAME(sc), sc->sc_msix ? "MSI-X" : "MSI");
         return false;
     }
 
