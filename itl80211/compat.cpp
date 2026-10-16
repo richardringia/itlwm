@@ -19,6 +19,9 @@
 //
 
 #include "compat.h"
+#include <linux/types.h>   /* XYLog */
+#include <IOKit/IOLocks.h>
+#include <stdarg.h>
 #include <sys/random.h>
 #include <sys/param.h>
 #include <sys/proc.h>
@@ -69,12 +72,143 @@ int pci_mapreg_map(const struct pci_attach_args *pa, int reg, pcireg_t type, int
 	return 0;
 }
 
+/*
+ * IOPCIDevice::configureInterrupts(interruptType, minVectors, maxVectors, options)
+ * exists in IOPCIFamily since macOS 11 but is absent from MacKernelSDK's IOPCIDevice.
+ * Bind the exported symbol directly (non-virtual call, `this` as first argument) and
+ * import it weakly so the kext still loads on older systems where it is missing.
+ */
+extern "C++" IOReturn IOPCIDevice_configureInterrupts(IOPCIDevice *dev, UInt32 interruptType,
+                                                      UInt32 minVectors, UInt32 maxVectors,
+                                                      IOOptionBits options)
+    __asm__("__ZN11IOPCIDevice19configureInterruptsEjjjj") __attribute__((weak_import));
+
+int
+pci_configure_msix(IOPCIDevice *dev, int nvec)
+{
+    if (&IOPCIDevice_configureInterrupts == NULL) {
+        XYLog("%s: IOPCIDevice::configureInterrupts unavailable, no MSI-X on this macOS\n", __FUNCTION__);
+        return 1;
+    }
+    IOReturn ret = IOPCIDevice_configureInterrupts(dev, kIOInterruptTypePCIMessagedX, 1, nvec, 0);
+    XYLog("%s: configureInterrupts(MSI-X, 1..%d) -> 0x%x\n", __FUNCTION__, nvec, ret);
+    return ret == kIOReturnSuccess ? 0 : 1;
+}
+
+
+/*
+ * Debug log ring. IOLog output from this kext does not reliably reach the unified
+ * log on macOS 26, so every XYLog line is also kept here and published as the
+ * "itlwm-log" property of the PCI device: `ioreg -rn PXSX -l | grep itlwm-log`.
+ * Appending is lock-protected and safe anywhere; publishing allocates and must
+ * only run in thread context (itlwm_ring_flush).
+ */
+#define ITLWM_RING_SIZE (256 * 1024)
+static char gItlwmRing[ITLWM_RING_SIZE];
+static size_t gItlwmRingLen;
+static IOSimpleLock *gItlwmRingLock;
+static IOService *gItlwmRingTarget;
+
+static IOSimpleLock *
+itlwm_ring_lock(void)
+{
+    if (gItlwmRingLock == NULL) {
+        IOSimpleLock *l = IOSimpleLockAlloc();
+        if (!OSCompareAndSwapPtr(NULL, l, (void * volatile *)&gItlwmRingLock))
+            IOSimpleLockFree(l);
+    }
+    return gItlwmRingLock;
+}
+
+extern "C" void
+itlwm_ring_log(const char *fmt, ...)
+{
+    char line[340];
+    va_list ap;
+    clock_sec_t secs;
+    clock_usec_t usecs;
+    /* wall-clock (UTC epoch) stamp so the ring lines up with log show / pmset */
+    clock_get_calendar_microtime(&secs, &usecs);
+    int h = snprintf(line, sizeof(line), "[%lu.%03u] ", (unsigned long)secs, (unsigned)(usecs / 1000));
+    if (h < 0 || (size_t)h >= sizeof(line))
+        h = 0;
+    va_start(ap, fmt);
+    int n = vsnprintf(line + h, sizeof(line) - h, fmt, ap);
+    va_end(ap);
+    if (n <= 0)
+        return;
+    n += h;
+    if ((size_t)n >= sizeof(line))
+        n = sizeof(line) - 1;
+    IOSimpleLock *lk = itlwm_ring_lock();
+    if (!lk)
+        return;
+    IOInterruptState is = IOSimpleLockLockDisableInterrupt(lk);
+    if (gItlwmRingLen + n >= ITLWM_RING_SIZE) {
+        /* drop the oldest half */
+        size_t keep = gItlwmRingLen / 2;
+        memmove(gItlwmRing, gItlwmRing + gItlwmRingLen - keep, keep);
+        gItlwmRingLen = keep;
+    }
+    memcpy(gItlwmRing + gItlwmRingLen, line, n);
+    gItlwmRingLen += n;
+    gItlwmRing[gItlwmRingLen] = '\0';
+    IOSimpleLockUnlockEnableInterrupt(lk, is);
+}
+
+void
+itlwm_ring_set_target(IOService *target)
+{
+    gItlwmRingTarget = target;
+    itlwm_ring_flush();
+}
+
+void
+itlwm_ring_flush(void)
+{
+    if (!gItlwmRingTarget)
+        return;
+    char *copy = (char *)IOMalloc(ITLWM_RING_SIZE);
+    if (!copy)
+        return;
+    IOSimpleLock *lk = itlwm_ring_lock();
+    IOInterruptState is = IOSimpleLockLockDisableInterrupt(lk);
+    memcpy(copy, gItlwmRing, gItlwmRingLen + 1);
+    IOSimpleLockUnlockEnableInterrupt(lk, is);
+    OSString *str = OSString::withCString(copy);
+    IOFree(copy, ITLWM_RING_SIZE);
+    if (str) {
+        gItlwmRingTarget->setProperty("itlwm-log", str);
+        str->release();
+    }
+}
+
+/* Find the first interrupt index whose type matches `typeMask`; -1 if none. */
+static int
+pci_intr_find_index(IOPCIDevice *dev, uint32_t typeMask)
+{
+    for (int index = 0; ; index++) {
+        int interruptType;
+        if (dev->getInterruptType(index, &interruptType) != kIOReturnSuccess)
+            break;
+        if ((uint32_t)interruptType & typeMask)
+            return index;
+    }
+    return -1;
+}
+
+/*
+ * Request true MSI-X vectors (needed by Bz/BE200, which cannot operate in MSI mode).
+ * Returns 0 and a handle with msix=1 when IOPCIFamily allocated an MSI-X vector,
+ * 1 otherwise (caller may fall back to pci_intr_map_msi).
+ */
 int
 pci_intr_map_msix(struct pci_attach_args *pa, int vec, pci_intr_handle_t *ihp)
 {
     pci_chipset_tag_t pc = pa->pa_pc;
     pcitag_t tag = pa->pa_tag;
     pcireg_t reg;
+    int index;
 
     KASSERT(PCI_MSIX_VEC(vec) == vec, "PCI_MSIX_VEC(vec) == vec");
 
@@ -83,23 +217,41 @@ pci_intr_map_msix(struct pci_attach_args *pa, int vec, pci_intr_handle_t *ihp)
 
     if (vec > PCI_MSIX_MC_TBLSZ(reg))
         return 1;
-    
-    return pci_intr_map_msi(pa, ihp);
+
+    /* One vector: all causes share it (Linux "shared vector" MSI-X mode).
+     * Idempotent on macOS 26: succeeds if the device already has this allocation. */
+    if (pci_configure_msix(tag, vec + 1))
+        return 1;
+
+    index = pci_intr_find_index(tag, kIOInterruptTypePCIMessagedX);
+    if (index < 0) {
+        XYLog("%s: MSI-X granted but no MSI-X interrupt index found\n", __FUNCTION__);
+        return 1;
+    }
+
+    if (pci_intr_map_msi(pa, ihp))
+        return 1;
+    (*ihp)->msix = 1;
+    (*ihp)->intr_index = index + vec;
+    XYLog("%s: MSI-X vector %d at interrupt index %d\n", __FUNCTION__, vec, (*ihp)->intr_index);
+    return 0;
 }
 
 int pci_intr_map_msi(struct pci_attach_args *paa, pci_intr_handle_t *ih) {
 	if (paa == 0 || ih == 0)
 		return 1;
-	
+
 	*ih = new pci_intr_handle();
-	
+
 	if (*ih == 0)
 		return 1;
-	
+
 	(*ih)->dev = paa->pa_tag;  // pci device reference
-	
+
 	(*ih)->workloop = paa->workloop;
-	
+	(*ih)->msix = 0;
+	(*ih)->intr_index = pci_intr_find_index(paa->pa_tag, kIOInterruptTypePCIMessaged);
+
 	return 0; // XXX not required on OS X
 }
 

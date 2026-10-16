@@ -583,6 +583,13 @@ enum iwx_fw_ini_allocation_id {
 #define IWX_CSR_GPIO_IN             (0x018) /* read external chip pins */
 #define IWX_CSR_RESET               (0x020) /* busmaster enable, NMI, etc*/
 #define IWX_CSR_GP_CNTRL            (0x024)
+#define IWX_CSR_FUNC_SCRATCH        (0x02c) /* Bz+: scratch, written before ROM start; 0 after power loss */
+#define IWX_CSR_FUNC_SCRATCH_INIT_VALUE (0x01010101)
+#define IWX_CSR_IPC_SLEEP_CONTROL   (0x114) /* Bz+: D3 handshake (replaces DOORBELL_TO_ISR6 SUSPEND/RESUME) */
+#define IWX_CSR_IPC_SLEEP_CONTROL_SUSPEND 0x3
+#define IWX_CSR_IPC_SLEEP_CONTROL_RESUME  0
+#define IWX_CSR_DOORBELL_VECTOR     (0x130) /* Bz+: NMI doorbell (replaces umac prph DOORBELL_TO_ISR6) */
+#define IWX_CSR_LTR_LAST_MSG        (0x0DC) /* last LTR message sent; read in a loop to keep the bus busy during IML load */
 
 /* 2nd byte of IWX_CSR_INT_COALESCING, not accessible via iwl_write32()! */
 #define IWX_CSR_INT_PERIODIC_REG    (0x005)
@@ -763,6 +770,18 @@ enum iwx_fw_ini_allocation_id {
 #define IWX_CSR_GP_CNTRL_REG_FLAG_INIT_DONE              (0x00000004)
 #define IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ         (0x00000008)
 #define IWX_CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP         (0x00000010)
+/*
+ * Bz+ (BE200) GP_CNTRL layout: MAC init/status/access/reset all moved here,
+ * replacing INIT_DONE / MAC_CLOCK_READY / MAC_ACCESS_REQ / CSR_RESET flags.
+ * Values from Linux iwl-csr.h.
+ */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_MAC_INIT               (0x00000040)  /* bit 6, replaces INIT_DONE */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_ROM_START              (0x00000080)  /* bit 7, replaces UREG_CPU_INIT_RUN */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_MAC_STATUS             (0x00100000)  /* bit 20, replaces MAC_CLOCK_READY poll */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ      (0x00200000)  /* bit 21, replaces MAC_ACCESS_REQ */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_BUS_MASTER_DISABLE_STATUS (0x10000000) /* bit 28 */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_BUS_MASTER_DISABLE_REQ (0x20000000)  /* bit 29, replaces CSR_RESET STOP_MASTER */
+#define IWX_CSR_GP_CNTRL_REG_FLAG_SW_RESET               (0x80000000)  /* bit 31, replaces CSR_RESET SW_RESET */
 
 #define IWX_CSR_GP_CNTRL_REG_VAL_MAC_ACCESS_EN           (0x00000001)
 
@@ -1101,6 +1120,9 @@ enum iwx_fw_ini_allocation_id {
  * 11-8:  queue selector
  */
 #define IWX_HBUS_TARG_WRPTR         (IWX_HBUS_BASE+0x060)
+/* Bz+: RX queue write pointers go through HBUS_TARG_WRPTR, queue id in the upper half */
+#define IWX_HBUS_TARG_WRPTR_Q_SHIFT (16)
+#define IWX_HBUS_TARG_WRPTR_RX_Q(q) (((q) + 512) << IWX_HBUS_TARG_WRPTR_Q_SHIFT)
 
 /**********************************************************
  * CSR values
@@ -1152,8 +1174,10 @@ enum iwx_msix_hw_int_causes {
     IWX_MSIX_HW_INT_CAUSES_REG_ALIVE    = (1 << 0),
     IWX_MSIX_HW_INT_CAUSES_REG_WAKEUP    = (1 << 1),
     IWX_MSIX_HW_INT_CAUSES_REG_IPC        = (1 << 1),
-    IWX_MSIX_HW_INT_CAUSES_REG_IML        = (1 << 2),
-    IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_V2    = (1 << 5),
+    IWX_MSIX_HW_INT_CAUSES_REG_IML        = (1 << 1),  /* shares bit 1 with WAKEUP (Linux); bit 2 is RESET_DONE */
+    IWX_MSIX_HW_INT_CAUSES_REG_RESET_DONE    = (1 << 2),
+    IWX_MSIX_HW_INT_CAUSES_REG_TOP_FATAL_ERR    = (1 << 3),
+    IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_V2    = (1 << 5),  /* == Linux SW_ERR_BZ */
     IWX_MSIX_HW_INT_CAUSES_REG_CT_KILL    = (1 << 6),
     IWX_MSIX_HW_INT_CAUSES_REG_RF_KILL    = (1 << 7),
     IWX_MSIX_HW_INT_CAUSES_REG_PERIODIC    = (1 << 8),
@@ -1174,7 +1198,10 @@ enum iwx_msix_ivar_for_cause {
     IWX_MSIX_IVAR_CAUSE_FH_ERR        = 0x5,
     IWX_MSIX_IVAR_CAUSE_REG_ALIVE        = 0x10,
     IWX_MSIX_IVAR_CAUSE_REG_WAKEUP        = 0x11,
-    IWX_MSIX_IVAR_CAUSE_REG_IML        = 0x12,
+    IWX_MSIX_IVAR_CAUSE_REG_IML        = 0x11,  /* IVAR index = 16 + cause bit; IML is bit 1 */
+    IWX_MSIX_IVAR_CAUSE_REG_RESET_DONE    = 0x12,
+    IWX_MSIX_IVAR_CAUSE_REG_TOP_FATAL_ERR    = 0x13,
+    IWX_MSIX_IVAR_CAUSE_REG_SW_ERR_BZ    = 0x15,
     IWX_MSIX_IVAR_CAUSE_REG_CT_KILL        = 0x16,
     IWX_MSIX_IVAR_CAUSE_REG_RF_KILL        = 0x17,
     IWX_MSIX_IVAR_CAUSE_REG_PERIODIC    = 0x18,
@@ -1193,10 +1220,16 @@ enum iwx_msix_ivar_for_cause {
  *****************************************************************************/
 
 #define IWX_CSR_ADDR_BASE            (0x380)
-#define IWX_CSR_MAC_ADDR0_OTP        (IWX_CSR_ADDR_BASE)
-#define IWX_CSR_MAC_ADDR1_OTP        (IWX_CSR_ADDR_BASE + 4)
-#define IWX_CSR_MAC_ADDR0_STRAP        (IWX_CSR_ADDR_BASE + 8)
-#define IWX_CSR_MAC_ADDR1_STRAP        (IWX_CSR_ADDR_BASE + 0xC)
+/* Bz and later moved the MAC address block (Linux cfg/bz.c mac_addr_from_csr = 0x30) */
+#define IWX_CSR_ADDR_BASE_BZ            (0x30)
+#define IWX_CSR_MAC_ADDR0_OTP_B(b)        ((b))
+#define IWX_CSR_MAC_ADDR1_OTP_B(b)        ((b) + 4)
+#define IWX_CSR_MAC_ADDR0_STRAP_B(b)        ((b) + 8)
+#define IWX_CSR_MAC_ADDR1_STRAP_B(b)        ((b) + 0xC)
+#define IWX_CSR_MAC_ADDR0_OTP        IWX_CSR_MAC_ADDR0_OTP_B(IWX_CSR_ADDR_BASE)
+#define IWX_CSR_MAC_ADDR1_OTP        IWX_CSR_MAC_ADDR1_OTP_B(IWX_CSR_ADDR_BASE)
+#define IWX_CSR_MAC_ADDR0_STRAP        IWX_CSR_MAC_ADDR0_STRAP_B(IWX_CSR_ADDR_BASE)
+#define IWX_CSR_MAC_ADDR1_STRAP        IWX_CSR_MAC_ADDR1_STRAP_B(IWX_CSR_ADDR_BASE)
 
 /**
  * uCode API flags
@@ -1387,6 +1420,7 @@ enum iwx_msix_ivar_for_cause {
 #define IWX_UCODE_TLV_CAPA_LAR_MULTI_MCC        29
 #define IWX_UCODE_TLV_CAPA_BT_COEX_RRC            30
 #define IWX_UCODE_TLV_CAPA_GSCAN_SUPPORT        31
+#define IWX_UCODE_TLV_CAPA_FRAGMENTED_PNVM_IMG  32  /* PNVM given as a table of DRAM segments */
 #define IWX_UCODE_TLV_CAPA_NAN_SUPPORT            34
 #define IWX_UCODE_TLV_CAPA_UMAC_UPLOAD            35
 #define IWX_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT        39
@@ -1413,6 +1447,8 @@ enum iwx_msix_ivar_for_cause {
 #define IWX_UCODE_TLV_CAPA_EXTEND_SHARED_MEM_CFG    80
 #define IWX_UCODE_TLV_CAPA_LQM_SUPPORT            81
 #define IWX_UCODE_TLV_CAPA_LED_CMD_SUPPORT        88
+
+#define IWX_UCODE_TLV_CAPA_MLD_API_SUPPORT        110
 
 #define IWX_NUM_UCODE_TLV_CAPA 128
 
@@ -1667,6 +1703,14 @@ struct iwx_rb_status {
  * @flags: flags (0: fragmented, all others: reserved)
  * @reserved2: reserved
  */
+/* Bz+: 4-byte RX completion ("used BD") entry (Linux iwl_rx_completion_desc_bz). */
+struct iwx_rx_completion_desc_bz {
+    uint16_t rbid;
+    uint8_t flags;
+#define IWX_RX_CD_FLAGS_FRAGMENTED (1 << 0)
+    uint8_t reserved[1];
+} __packed;
+
 struct iwx_rx_completion_desc {
     uint32_t reserved1;
     uint16_t rbid;
@@ -1683,6 +1727,7 @@ struct iwx_rx_completion_desc {
 #define IWX_TFD_QUEUE_BC_SIZE        (IWX_TFD_QUEUE_SIZE_MAX + \
                     IWX_TFD_QUEUE_SIZE_BC_DUP)
 #define IWX_TFD_QUEUE_BC_SIZE_GEN3    1024
+#define IWX_TFD_QUEUE_BC_SIZE_GEN3_BZ (1024 * 4)  /* Bz+: 4096-entry byte-count table */
 #define IWX_TFH_NUM_TBS        25
 
 /**
@@ -3469,6 +3514,236 @@ struct iwx_phy_context_cmd_v1 {
  * @dsp_cfg_flags: set to 0
  * @reserved: reserved to align to 64 bit
  */
+/*
+ * MLD command API (Bz / BE200 -92 firmware, capa MLD_API_SUPPORT).
+ * Layouts from Linux 6.12 fw/api/mac-cfg.h, datapath.h, mac.h.
+ */
+#define IWX_MAC_CONFIG_CMD          0x08    /* MAC_CONF_GROUP */
+#define IWX_LINK_CONFIG_CMD         0x09
+#define IWX_STA_CONFIG_CMD          0x0a
+#define IWX_STA_REMOVE_CMD          0x0c
+#define IWX_SCD_QUEUE_CONFIG_CMD    0x17    /* DATA_PATH_GROUP */
+#define IWX_SEC_KEY_CMD             0x18    /* DATA_PATH_GROUP */
+
+#define IWX_MAC_CFG_FILTER_ACCEPT_GRP       (1 << 2)
+#define IWX_MAC_CFG_FILTER_ACCEPT_BEACON    (1 << 3)
+
+struct iwx_mac_client_data {
+    uint8_t is_assoc;
+    uint8_t esr_transition_timeout;
+    uint16_t medium_sync_delay;
+    uint16_t assoc_id;
+    uint16_t reserved1;
+    uint16_t data_policy;
+    uint16_t reserved2;
+    uint32_t ctwin;
+} __packed; /* MAC_CONTEXT_CONFIG_CLIENT_DATA_API_S_VER_2 */
+
+struct iwx_mac_config_cmd {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t mac_type;
+    uint8_t local_mld_addr[6];
+    uint16_t reserved_for_local_mld_addr;
+    uint32_t filter_flags;
+    uint16_t he_support;
+    uint16_t he_ap_support;
+    uint32_t eht_support;
+    uint32_t nic_not_ack_enabled;
+    struct iwx_mac_client_data client;
+} __packed; /* MAC_CONTEXT_CONFIG_CMD_API_S_VER_2 */
+
+#define IWX_LINK_CONTEXT_MODIFY_ACTIVE          (1 << 0)
+#define IWX_LINK_CONTEXT_MODIFY_RATES_INFO      (1 << 1)
+#define IWX_LINK_CONTEXT_MODIFY_PROTECT_FLAGS   (1 << 2)
+#define IWX_LINK_CONTEXT_MODIFY_QOS_PARAMS      (1 << 3)
+#define IWX_LINK_CONTEXT_MODIFY_BEACON_TIMING   (1 << 4)
+#define IWX_LINK_CONTEXT_MODIFY_HE_PARAMS       (1 << 5)
+#define IWX_LINK_CONTEXT_MODIFY_BSS_COLOR_DISABLE (1 << 6)
+#define IWX_LINK_PROT_FLG_TGG_PROTECT   (1 << 0)
+#define IWX_LINK_PROT_FLG_HT_PROT       (1 << 1)
+#define IWX_LINK_PROT_FLG_FAT_PROT      (1 << 2)
+#define IWX_LINK_FLG_BSS_COLOR_DIS      (1 << 0)
+#define IWX_LINK_FLG_MU_EDCA_CW         (1 << 1)
+
+struct iwx_link_ac_qos {
+    uint16_t cw_min;
+    uint16_t cw_max;
+    uint8_t aifsn;
+    uint8_t fifos_mask;
+    uint16_t edca_txop;
+} __packed; /* AC_QOS_API_S_VER_2 */
+
+struct iwx_link_he_backoff_conf {
+    uint16_t cwmin;
+    uint16_t cwmax;
+    uint16_t aifsn;
+    uint16_t mu_time;
+} __packed;
+
+struct iwx_link_config_cmd {
+    uint32_t action;
+    uint32_t link_id;
+    uint32_t mac_id;
+    uint32_t phy_id;
+    uint8_t local_link_addr[6];
+    uint16_t reserved_for_local_link_addr;
+    uint32_t modify_mask;
+    uint32_t active;
+    uint32_t listen_lmac;   /* union with block_tx */
+    uint32_t cck_rates;
+    uint32_t ofdm_rates;
+    uint32_t cck_short_preamble;
+    uint32_t short_slot;
+    uint32_t protection_flags;
+    uint32_t qos_flags;
+    struct iwx_link_ac_qos ac[5];
+    uint8_t htc_trig_based_pkt_ext;
+    uint8_t rand_alloc_ecwmin;
+    uint8_t rand_alloc_ecwmax;
+    uint8_t ndp_fdbk_buff_th_exp;
+    struct iwx_link_he_backoff_conf trig_based_txf[4];
+    uint32_t bi;
+    uint32_t dtim_interval;
+    uint16_t puncture_mask;
+    uint16_t frame_time_rts_th;
+    uint32_t flags;
+    uint32_t flags_mask;
+    uint8_t ref_bssid_addr[6];
+    uint16_t reserved_for_ref_bssid_addr;
+    uint8_t bssid_index;
+    uint8_t bss_color;
+    uint8_t spec_link_id;
+    uint8_t ul_mu_data_disable;
+    uint8_t ibss_bssid_addr[6];
+    uint16_t reserved_for_ibss_bssid_addr;
+    uint32_t reserved3[8];
+} __packed; /* LINK_CONTEXT_CONFIG_CMD_API_S_VER_1.._VER_5 */
+
+#define IWX_STATION_TYPE_PEER   0
+
+struct iwx_sta_cfg_cmd {
+    uint32_t sta_id;
+    uint32_t link_id;
+    uint8_t peer_mld_address[6];
+    uint16_t reserved_for_peer_mld_address;
+    uint8_t peer_link_address[6];
+    uint16_t reserved_for_peer_link_address;
+    uint32_t station_type;
+    uint32_t assoc_id;
+    uint32_t beamform_flags;
+    uint32_t mfp;
+    uint32_t mimo;
+    uint32_t mimo_protection;
+    uint32_t ack_enabled;
+    uint32_t trig_rnd_alloc;
+    uint32_t tx_ampdu_spacing;
+    uint32_t tx_ampdu_max_size;
+    uint32_t sp_length;
+    uint32_t uapsd_acs;
+    uint8_t pkt_ext[2][5][2];   /* iwl_he_pkt_ext_v2 */
+    uint32_t htc_flags;
+} __packed; /* STA_CMD_API_S_VER_1 */
+
+struct iwx_remove_sta_cmd {
+    uint32_t sta_id;
+} __packed; /* REMOVE_STA_API_S_VER_1 */
+
+#define IWX_SCD_QUEUE_ADD       0
+#define IWX_SCD_QUEUE_REMOVE    1
+
+struct iwx_scd_queue_cfg_cmd {
+    uint32_t operation;
+    union {
+        struct {
+            uint32_t sta_mask;
+            uint8_t tid;
+            uint8_t reserved[3];
+            uint32_t flags;
+            uint32_t cb_size;
+            uint64_t bc_dram_addr;
+            uint64_t tfdq_dram_addr;
+        } __packed add;
+        struct {
+            uint32_t sta_mask;
+            uint32_t tid;
+        } __packed remove;
+    } __packed u;
+} __packed; /* TX_QUEUE_CFG_CMD_API_S_VER_3 */
+
+#define IWX_SEC_KEY_FLAG_CIPHER_CCMP    0x02
+#define IWX_SEC_KEY_FLAG_MFP            0x20
+#define IWX_SEC_KEY_FLAG_MCAST_KEY      0x40
+
+struct iwx_sec_key_cmd {
+    uint32_t action;
+    union {
+        struct {
+            uint32_t sta_mask;
+            uint32_t key_id;
+            uint32_t key_flags;
+            uint8_t key[32];
+            uint8_t tkip_mic_rx_key[8];
+            uint8_t tkip_mic_tx_key[8];
+            uint64_t rx_seq;
+            uint64_t tx_seq;
+        } __packed add;
+        struct {
+            uint32_t sta_mask;
+            uint32_t key_id;
+            uint32_t key_flags;
+        } __packed remove;
+    } __packed u;
+} __packed; /* SEC_KEY_CMD_API_S_VER_1 */
+
+/* RX_BAID_ALLOCATION_CONFIG_CMD (DATA_PATH_GROUP 0x16) v2; response = __le32 baid */
+#define IWX_RX_BAID_ALLOCATION_CONFIG_CMD   0x16
+#define IWX_RX_BAID_ACTION_ADD      0
+#define IWX_RX_BAID_ACTION_REMOVE   2
+struct iwx_rx_baid_cfg_cmd {
+    uint32_t action;
+    union {
+        struct {
+            uint32_t sta_id_mask;
+            uint8_t tid;
+            uint8_t reserved[3];
+            uint16_t ssn;
+            uint16_t win_size;
+        } __packed alloc;
+        struct {
+            uint32_t old_sta_id_mask;
+            uint32_t new_sta_id_mask;
+            uint32_t tid;
+        } __packed modify;
+        struct {
+            uint32_t sta_id_mask;
+            uint32_t tid;
+        } __packed remove;
+    } __packed u;
+} __packed; /* RX_BAID_ALLOCATION_CONFIG_CMD_API_S_VER_2 */
+
+static_assert(sizeof(struct iwx_rx_baid_cfg_cmd) == 16, "RX_BAID_ALLOCATION v2 ABI");
+static_assert(sizeof(struct iwx_mac_config_cmd) == 52, "MAC_CONFIG v2 ABI");
+static_assert(sizeof(struct iwx_link_config_cmd) == 208, "LINK_CONFIG v2 ABI");
+static_assert(sizeof(struct iwx_sta_cfg_cmd) == 96, "STA_CONFIG v1 ABI");
+static_assert(sizeof(struct iwx_scd_queue_cfg_cmd) == 36, "SCD_QUEUE_CONFIG v3 ABI");
+static_assert(sizeof(struct iwx_sec_key_cmd) == 80, "SEC_KEY v1 ABI");
+
+/* RLC_CONFIG_CMD (DATA_PATH_GROUP 0x8), Linux fw/api/datapath.h; v2 replaces
+ * PHY_CONTEXT_CMD rxchain_info on Bz (PHY_CONTEXT_CMD v4+) */
+#define IWX_RLC_CONFIG_CMD 0x08
+struct iwx_rlc_config_cmd {
+    uint32_t phy_id;
+    uint32_t rx_chain_info;
+    uint32_t rlc_reserved;
+    uint32_t chain_a_sad_mode;
+    uint32_t chain_b_sad_mode;
+    uint32_t sad_mac_id;
+    uint32_t sad_reserved;
+    uint8_t flags;
+    uint8_t reserved[3];
+} __packed; /* RLC_CONFIG_CMD_API_S_VER_2 */
+
 struct iwx_phy_context_cmd {
     /* COMMON_INDEX_HDR_API_S_VER_1 */
     uint32_t id_and_color;
@@ -6932,6 +7207,8 @@ struct iwx_scan_config {
  * @iter_count:        repetition count for the channel.
  * @iter_interval:    interval between two scan iterations on one channel.
  */
+/* scan cmd v17+: band moves from v2.band into flags[31:30], v2.band becomes psd_20 */
+#define IWX_CHAN_CFG_FLAGS_BAND_POS 30
 struct iwx_scan_channel_cfg_umac {
     uint32_t flags;
     union {
@@ -7914,6 +8191,19 @@ struct iwx_mcc_update_resp_v3 {
  * @channels: channel control data map, DWORD for each channel. Only the first
  *    16bits are used.
  */
+struct iwx_mcc_update_resp_v8 {
+    uint32_t status;
+    uint16_t mcc;
+    uint8_t padding[2];
+    uint32_t cap;
+    uint16_t time;
+    uint16_t geo_info;
+    uint8_t source_id;
+    uint8_t reserved[3];
+    uint32_t n_channels;
+    uint32_t channels[0];
+} __packed; /* LAR_UPDATE_MCC_CMD_RESP_S_VER_8 */
+
 struct iwx_mcc_update_resp {
     uint32_t status;
     uint16_t mcc;

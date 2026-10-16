@@ -174,8 +174,15 @@ public:
 	IOPCIDevice*		dev;
 	void (*func)(void* arg);
 	void* arg;
+	int			msix;		/* 1 if IOPCIFamily granted MSI-X vectors for this device */
+	int			intr_index;	/* IOPCIDevice interrupt index to use with IOInterruptEventSource, -1 if unknown */
 };
 typedef pci_intr_handle* pci_intr_handle_t;
+
+/* IOPCIFamilyDefinitions.h (macOS 11+); MacKernelSDK only knows kIOInterruptTypePCIMessaged. */
+#ifndef kIOInterruptTypePCIMessagedX
+#define kIOInterruptTypePCIMessagedX 0x00020000
+#endif
 
 /*
  * Actions for ca_activate.
@@ -281,6 +288,13 @@ pcireg_t	pci_mapreg_type(pci_chipset_tag_t pc, pcitag_t tag, int reg);
 int		pci_mapreg_map(const struct pci_attach_args *pa, int reg, pcireg_t type, int busflags, bus_space_tag_t *tagp,
 			       bus_space_handle_t *handlep, bus_addr_t *basep, bus_size_t *sizep, bus_size_t maxsize);
 int     pci_intr_map_msix(struct pci_attach_args *pa, int vec, pci_intr_handle_t *ihp);
+/* Ask IOPCIFamily for `nvec` MSI-X vectors. Must run before anything resolves the device's
+ * interrupts (getInterruptType, IOInterruptSpecifiers, saveDeviceState). 0 = success. */
+int     pci_configure_msix(IOPCIDevice *dev, int nvec);
+/* Log ring → IORegistry: set the service that carries the "itlwm-log" property,
+ * and publish the current ring (call from thread context only). */
+void    itlwm_ring_set_target(IOService *target);
+void    itlwm_ring_flush(void);
 int		pci_intr_map_msi(struct pci_attach_args *paa, pci_intr_handle_t *ih);
 int		pci_intr_map(struct pci_attach_args *paa, pci_intr_handle_t *ih);
 void*		pci_intr_establish(pci_chipset_tag_t pc, pci_intr_handle_t ih, int level, int (*handler)(void *), void *arg);

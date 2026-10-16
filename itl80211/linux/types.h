@@ -110,10 +110,27 @@
 
 #define BUILD_BUG_ON(condition) ((void)sizeof(char[1 - 2*!!(condition)]))
 
+/*
+ * kprintf only reaches a serial console; IOLog lands in the kernel message
+ * buffer and the unified log (`log show --predicate 'process == "kernel"'`),
+ * which is what we can actually read on a hackintosh. Emit both.
+ * The prefix must be literal: os_log redacts %s arguments to <private>.
+ */
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* In-memory log ring, published as the "itlwm-log" IORegistry property (itl80211/compat.cpp). */
+void itlwm_ring_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+#ifdef __cplusplus
+}
+#endif
+
 #define XYLog(fmt, x...)\
 do\
 {\
-kprintf("%s: " fmt, "itlwm", ##x);\
+kprintf("itlwm: " fmt, ##x);\
+IOLog("itlwm: " fmt, ##x);\
+itlwm_ring_log(fmt, ##x);\
 }while(0)
 
 typedef UInt8  u8;

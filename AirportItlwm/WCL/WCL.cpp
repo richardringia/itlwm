@@ -183,7 +183,17 @@ IOReturn AirportItlwmSkywalkInterface::wclCommand(OSObject *, void *a0, void *a1
         case 8: return self->installWCLKey(static_cast<apple80211_key *>(a2));
         case 9: return self->accessWCLRSN(static_cast<apple80211_rsn_ie_data *>(a2), true);
         case 10: return self->accessWCLRSN(static_cast<apple80211_rsn_ie_data *>(a2), false);
-        case 0: return self->beginWCLScan(static_cast<apple80211ScanRequest *>(a2));
+        case 0: {
+            AirportWCL::ScanRequest dbg = {};
+            AirportWCL::decodeScan(a2, 0x1550, dbg);
+            ieee80211com *dic = self->fHalService->get80211Controller();
+            IOReturn r = self->beginWCLScan(static_cast<apple80211ScanRequest *>(a2));
+            XYLog("WCL scan req: type=%u ssidlen=%u nchan=%u state=%d -> 0x%x (published so far %u, rejected %u)\n",
+                  dbg.type, dbg.ssidLength, dbg.channelCount, dic->ic_state, r,
+                  self->wclDbgPublished, self->wclDbgRejected);
+            self->wclDbgPublished = self->wclDbgRejected = 0;
+            return r;
+        }
         case 1: return self->beginWCLJoin(static_cast<apple80211AssocCandidates *>(a2));
         case 2: return self->abortWCLJoin();
         case 3: return self->leaveWCLNetwork();
@@ -257,9 +267,13 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
     }
     scanPending = true;
     scanCompleted = false;
-    scanSkipCompletion = ic->ic_state == IEEE80211_S_SCAN &&
-        ((scan.type != 2 && scan.ssidLength != 0) ||
-         ic->ic_wcl_scan_ssid_length != 0 || ic->ic_des_esslen != 0);
+    /*
+     * A request that lands in the middle of net80211's own scan would
+     * otherwise complete when that scan ends, so WCL only saw the channels
+     * left in it (BE200 t10: 0-2 of ~35 networks). Complete on the next
+     * full scan, which also uses WCL's channel list and SSID.
+     */
+    scanSkipCompletion = ic->ic_state == IEEE80211_S_SCAN;
     ic->ic_wcl_scan_requested = true;
     ic->ic_wcl_scan_active = scan.type != 2;
     ic->ic_wcl_scan_ssid_length = scan.type == 2 ? 0 : scan.ssidLength;
@@ -295,6 +309,7 @@ void AirportItlwmSkywalkInterface::finishWCLScan(IOReturn status)
     scanCompleted = false;
     scanSource->cancelTimeout();
     fHalService->get80211Controller()->ic_wcl_scan_requested = false;
+    XYLog("WCL ScanDone status=0x%x published=%u rejected=%u\n", status, wclDbgPublished, wclDbgRejected);
     instance->postMessage(this, AirportWCL::ScanDone, &status, sizeof(status), true);
 }
 
@@ -306,14 +321,21 @@ void AirportItlwmSkywalkInterface::completeWCLScan()
 
 void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, const uint8_t *ies, size_t length)
 {
-    if (!node || node->ni_esslen > 32 || !AirportWCL::validIEs(ies, length))
+    if (!node || node->ni_esslen > 32 || !AirportWCL::validIEs(ies, length)) {
+        wclDbgRejected++;
         return;
+    }
     ieee80211com *ic = fHalService->get80211Controller();
-    if (!node->ni_chan || node->ni_chan == IEEE80211_CHAN_ANYC)
+    if (!node->ni_chan || node->ni_chan == IEEE80211_CHAN_ANYC) {
+        wclDbgRejected++;
         return;
+    }
     unsigned channel = ieee80211_chan2ieee(ic, node->ni_chan);
-    if (!channel || channel > 196)
+    if (!channel || channel > 196) {
+        wclDbgRejected++;
         return;
+    }
+    wclDbgPublished++;
     size_t size = sizeof(AirportWCL::BeaconMetadata) + length;
     auto metadata = static_cast<AirportWCL::BeaconMetadata *>(IOMalloc(size));
     if (!metadata)
@@ -427,6 +449,9 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
     bool enterprise = auth == AirportWCL::LegacyAuth::Enterprise;
     bool supported = auth != AirportWCL::LegacyAuth::Invalid;
     ieee80211com *ic = fHalService->get80211Controller();
+    XYLog("WCL join req: ssidlen=%u bssid=%02x:%02x:%02x:%02x:%02x:%02x auth=%d state=%d joinPending=%d scanPending=%d macReconfig=%d\n",
+          join.ssidLength, join.bssid[0], join.bssid[1], join.bssid[2], join.bssid[3], join.bssid[4], join.bssid[5],
+          (int)auth, ic->ic_state, joinPending, scanPending, ic->ic_wcl_mac_reconfig);
     // Applying a private MAC restarts firmware asynchronously. WCL can issue
     // the association before that restart has completed; keep one request
     // until the HAL reports READY rather than making the user retry it.
@@ -555,6 +580,7 @@ void AirportItlwmSkywalkInterface::finishWCLJoin(uint16_t status, uint16_t reaso
 {
     if (!joinPending)
         return;
+    XYLog("WCL join finish: status=%u reason=%u drv=0x%x\n", status, reason, driverStatus);
     AirportWCL::ConnectionEvent event = {};
     event.status = status;
     event.reason = reason;
@@ -580,6 +606,7 @@ void AirportItlwmSkywalkInterface::wclJoinTimeout(OSObject *owner, IOTimerEventS
 {
     auto self = OSDynamicCast(AirportItlwmSkywalkInterface, owner);
     if (self && !self->wclStopping) {
+        XYLog("WCL join TIMEOUT (30 s)\n");
         self->finishWCLJoin(1, 1004, kIOReturnTimeout);
         self->leaveWCLNetwork();
     }
@@ -588,6 +615,7 @@ void AirportItlwmSkywalkInterface::wclJoinTimeout(OSObject *owner, IOTimerEventS
 IOReturn AirportItlwmSkywalkInterface::leaveWCLNetwork()
 {
     ieee80211com *ic = fHalService->get80211Controller();
+    XYLog("WCL leave network (state=%d)\n", ic->ic_state);
     portAuthorized = false;
     updateWCLLinkQuality(true);
     joinPending = false;
@@ -667,6 +695,8 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
         case IEEE80211_EVT_DRIVER_READY:
         case IEEE80211_EVT_DRIVER_STOPPED: {
             bool ready = code == IEEE80211_EVT_DRIVER_READY;
+            XYLog("WCL driver %s (macReconfig=%d joinPending=%d)\n", ready ? "READY" : "STOPPED",
+                  ic->ic_wcl_mac_reconfig, joinPending);
             if (!ready) {
                 finishWCLScan(ic->ic_wcl_mac_reconfig ? kIOReturnAborted : kIOReturnOffline);
                 finishWCLJoin(1, 0, kIOReturnOffline);

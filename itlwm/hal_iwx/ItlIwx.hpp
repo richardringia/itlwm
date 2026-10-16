@@ -199,6 +199,14 @@ public:
     
     uint8_t    iwx_lookup_cmd_ver(struct iwx_softc *, uint8_t, uint8_t);
     uint8_t    iwx_lookup_notif_ver(struct iwx_softc *, uint8_t, uint8_t);
+    int        iwx_has_new_station_api(struct iwx_softc *);
+    int        iwx_mld_link_cmd(struct iwx_softc *, struct iwx_node *, uint32_t, uint32_t, uint32_t);
+    int        iwx_mld_mac_cmd(struct iwx_softc *, struct iwx_node *, uint32_t, int);
+    int        iwx_mld_sta_cmd(struct iwx_softc *, struct iwx_node *);
+    int        iwx_mld_txq_remove(struct iwx_softc *, int);
+    int        iwx_mld_rm_sta_cmd(struct iwx_softc *);
+    int        iwx_mld_baid_cmd(struct iwx_softc *, uint8_t, uint16_t, uint16_t, int, uint32_t *);
+    int        iwx_mld_set_key(struct iwx_softc *, struct ieee80211_node *, struct ieee80211_key *, int);
     uint32_t    iwx_lmac_id(struct iwx_softc *, ieee80211_channel *);
     int    iwx_store_cscheme(struct iwx_softc *, uint8_t *, size_t);
     int    iwx_alloc_fw_monitor_block(struct iwx_softc *, uint8_t, uint8_t);
@@ -222,6 +230,7 @@ public:
     int    iwx_read_firmware(struct iwx_softc *);
     int    iwx_read_pnvm(struct iwx_softc *);
     int     iwx_load_pnvm(struct iwx_softc *);
+    void    iwx_pnvm_free_dram(struct iwx_softc *);
     int     iwx_pnvm_handle_section(struct iwx_softc *, const uint8_t *, size_t);
     uint32_t iwx_read_prph_unlocked(struct iwx_softc *, uint32_t);
     uint32_t iwx_read_prph(struct iwx_softc *, uint32_t);
@@ -266,6 +275,8 @@ public:
     void    iwx_apm_config(struct iwx_softc *);
     int    iwx_apm_init(struct iwx_softc *);
     void    iwx_apm_stop(struct iwx_softc *);
+    void    iwx_sw_reset(struct iwx_softc *);
+    int     iwx_finish_nic_init(struct iwx_softc *);
     int    iwx_allow_mcast(struct iwx_softc *);
     void    iwx_init_msix_hw(struct iwx_softc *);
     void    iwx_conf_msix_hw(struct iwx_softc *, int);
@@ -479,6 +490,7 @@ public:
     static int    iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count);
     static int    iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count);
     static int    iwx_match(IOPCIDevice *);
+    static int    iwx_needs_msix(IOPCIDevice *);   /* Bz/Gl family: MSI-X only */
     int    iwx_preinit(struct iwx_softc *);
     void    iwx_attach_hook(struct device *);
     bool    iwx_attach(struct iwx_softc *, struct pci_attach_args *);

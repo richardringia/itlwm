@@ -117,6 +117,7 @@ void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
 {
     struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
     (*ifp->if_watchdog)(ifp);
+    itlwm_ring_flush();   /* keep the "itlwm-log" IORegistry property current (workloop thread) */
 
     watchdogTimer->setTimeoutMS(kWatchDogTimerPeriod);
 }
@@ -263,8 +264,14 @@ initCCLogs()
     return driverLogPipe && driverDataPathPipe && driverSnapshotsPipe && driverFaultReporter;
 }
 
+namespace {
+/* Publishes the debug log ring whenever start() returns, on any path. */
+struct ItlwmLogFlushGuard { ~ItlwmLogFlushGuard() { itlwm_ring_flush(); } };
+}
+
 bool AirportItlwm::start(IOService *provider)
 {
+    ItlwmLogFlushGuard logFlush;
 #if __IO80211_TARGET == __MAC_15_2
     if (version_major != 24 || version_minor < 2)
         return false;
@@ -278,11 +285,13 @@ bool AirportItlwm::start(IOService *provider)
     setProperty("DriverKitDriver", kOSBooleanFalse);
 #ifdef AIRPORT_WCL
     if (!initCCLogs()) {
+        XYLog("%s: initCCLogs failed\n", __FUNCTION__);
         releaseAll();
         return false;
     }
 #endif
     if (!super::start(provider)) {
+        XYLog("%s: super::start (IO80211Controller) failed\n", __FUNCTION__);
 #ifdef AIRPORT_WCL
         releaseAll();
 #endif
@@ -294,10 +303,12 @@ bool AirportItlwm::start(IOService *provider)
     pciNub->configWrite8(0x41, 0);
     if (pciNub->requestPowerDomainState(kIOPMPowerOn,
                                         (IOPowerConnection *) getParentEntry(gIOPowerPlane), IOPMLowestState) != IOPMNoErr) {
+        XYLog("%s: requestPowerDomainState failed\n", __FUNCTION__);
         super::stop(provider);
         return false;
     }
     if (initPCIPowerManagment(pciNub) == false) {
+        XYLog("%s: initPCIPowerManagment failed\n", __FUNCTION__);
         super::stop(pciNub);
         return false;
     }
@@ -336,6 +347,7 @@ bool AirportItlwm::start(IOService *provider)
         fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_HEON;
 #endif
 
+    XYLog("%s: calling HAL attach\n", __FUNCTION__);
     if (!fHalService->attach(pciNub)) {
         XYLog("attach fail\n");
         super::stop(pciNub);
@@ -843,6 +855,10 @@ IOReturn AirportItlwm::getHardwareAddress(IOEthernetAddress *addrP)
 
 IOReturn AirportItlwm::setHardwareAddress(const void *addrP, UInt32 addrBytes)
 {
+    if (addrP && addrBytes >= 6) {
+        const uint8_t *a = (const uint8_t *)addrP;
+        XYLog("setHardwareAddress %02x:%02x:%02x:%02x:%02x:%02x\n", a[0], a[1], a[2], a[3], a[4], a[5]);
+    }
     if (!fNetIf || !addrP)
         return kIOReturnError;
 #ifdef AIRPORT_WCL
@@ -1375,6 +1391,7 @@ void AirportItlwm::setPowerStateOff()
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOff;
     disableAdapter(bsdInterface);
+    itlwm_ring_flush();   /* watchdog is stopped from here: publish pre-sleep lines now */
     pmPolicyMaker->acknowledgeSetPowerState();
 }
 
@@ -1382,5 +1399,6 @@ void AirportItlwm::setPowerStateOn()
 {
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOn;
+    itlwm_ring_flush();
     pmPolicyMaker->acknowledgeSetPowerState();
 }

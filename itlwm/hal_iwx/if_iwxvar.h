@@ -125,6 +125,7 @@
 #define IWL_CFG_MAC_TYPE_SOF        0x43
 #define IWL_CFG_MAC_TYPE_MA        0x44
 #define IWL_CFG_MAC_TYPE_BZ        0x46
+#define IWL_CFG_MAC_TYPE_GL        0x47
 
 #define IWL_CFG_RF_TYPE_TH        0x105
 #define IWL_CFG_RF_TYPE_TH1        0x108
@@ -225,7 +226,7 @@ struct iwx_tx_radiotap_header {
 	 (1 << IEEE80211_RADIOTAP_RATE) |				\
 	 (1 << IEEE80211_RADIOTAP_CHANNEL))
 
-#define IWX_UCODE_SECT_MAX 60
+#define IWX_UCODE_SECT_MAX 128  /* Bz -92 ucode has 71 RT sections (29 LMAC + 18 UMAC + 22 paging + 2 separators) */
 
 /*
  * fw_status is used to determine if we've already parsed the firmware file
@@ -481,6 +482,7 @@ struct iwl_cfg_trans_params {
     int ltr_delay;
     int xtal_latency;
     int bisr_workaround;
+    uint32_t umac_prph_offset;  /* Bz+: UMAC PRPH window offset (Linux trans.umac_prph_offset) */
 };
 
 struct iwl_cfg {
@@ -652,6 +654,7 @@ struct iwx_softc {
 	int sc_device_family;
 #define IWX_DEVICE_FAMILY_22000	1
 #define IWX_DEVICE_FAMILY_AX210	2
+#define IWX_DEVICE_FAMILY_BZ	3	/* Bz / Gl (BE200, BE202): gen3 ctxt-info, MSI-X only */
 
 	struct iwx_dma_info ctxt_info_dma;
 	struct iwx_self_init_dram init_dram;
@@ -660,6 +663,11 @@ struct iwx_softc {
     struct iwx_dma_info prph_info_dma;
     struct iwx_dma_info iml_dma;
     struct iwx_dma_info pnvm_dram;
+    /* Fragmented PNVM (fw capa FRAGMENTED_PNVM_IMG, Bz): one DMA region per payload + address table */
+#define IWX_PNVM_MAX_SEGMENTS 64   /* Linux IPC_DRAM_MAP_ENTRY_NUM_MAX */
+    struct iwx_dma_info pnvm_seg[IWX_PNVM_MAX_SEGMENTS];
+    int pnvm_nseg;
+    struct iwx_dma_info pnvm_desc;
 
 	int sc_fw_chunk_done;
 	int sc_init_complete;
@@ -679,6 +687,10 @@ struct iwx_softc {
 #define IWX_MAX_FW_CMD_VERSIONS	800
 	struct iwx_fw_cmd_version cmd_versions[IWX_MAX_FW_CMD_VERSIONS];
 	int n_cmd_versions;
+	uint64_t sc_scan_start_abs;	/* BE200 bring-up: scan duration logging */
+	int sc_mld_mgmt_qid;		/* MLD: firmware-assigned mgmt/data queue */
+	int sc_mld_tid_qid[IWX_MAX_TID_COUNT];	/* MLD: per-TID agg queues, live until STA_REMOVE */
+	uint32_t sc_mld_key_flags[8];	/* MLD: SEC_KEY flags per key id (|VALID) installed in fw */
     char sc_fw_mcc[3];
     uint16_t sc_fw_mcc_int;
 #define IWX_IML_MAX_LEN 2048*10
