@@ -1220,10 +1220,16 @@ enum iwx_msix_ivar_for_cause {
  *****************************************************************************/
 
 #define IWX_CSR_ADDR_BASE            (0x380)
-#define IWX_CSR_MAC_ADDR0_OTP        (IWX_CSR_ADDR_BASE)
-#define IWX_CSR_MAC_ADDR1_OTP        (IWX_CSR_ADDR_BASE + 4)
-#define IWX_CSR_MAC_ADDR0_STRAP        (IWX_CSR_ADDR_BASE + 8)
-#define IWX_CSR_MAC_ADDR1_STRAP        (IWX_CSR_ADDR_BASE + 0xC)
+/* Bz and later moved the MAC address block (Linux cfg/bz.c mac_addr_from_csr = 0x30) */
+#define IWX_CSR_ADDR_BASE_BZ            (0x30)
+#define IWX_CSR_MAC_ADDR0_OTP_B(b)        ((b))
+#define IWX_CSR_MAC_ADDR1_OTP_B(b)        ((b) + 4)
+#define IWX_CSR_MAC_ADDR0_STRAP_B(b)        ((b) + 8)
+#define IWX_CSR_MAC_ADDR1_STRAP_B(b)        ((b) + 0xC)
+#define IWX_CSR_MAC_ADDR0_OTP        IWX_CSR_MAC_ADDR0_OTP_B(IWX_CSR_ADDR_BASE)
+#define IWX_CSR_MAC_ADDR1_OTP        IWX_CSR_MAC_ADDR1_OTP_B(IWX_CSR_ADDR_BASE)
+#define IWX_CSR_MAC_ADDR0_STRAP        IWX_CSR_MAC_ADDR0_STRAP_B(IWX_CSR_ADDR_BASE)
+#define IWX_CSR_MAC_ADDR1_STRAP        IWX_CSR_MAC_ADDR1_STRAP_B(IWX_CSR_ADDR_BASE)
 
 /**
  * uCode API flags

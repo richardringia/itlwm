@@ -4896,12 +4896,15 @@ int ItlIwx::
 iwx_set_mac_addr_from_csr(struct iwx_softc *sc, struct iwx_nvm_data *data)
 {
     uint32_t mac_addr0, mac_addr1;
+    uint32_t base = sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ ?
+        IWX_CSR_ADDR_BASE_BZ : IWX_CSR_ADDR_BASE;
     
     if (!iwx_nic_lock(sc))
         return EBUSY;
     
-    mac_addr0 = htole32(IWX_READ(sc, IWX_CSR_MAC_ADDR0_STRAP));
-    mac_addr1 = htole32(IWX_READ(sc, IWX_CSR_MAC_ADDR1_STRAP));
+    mac_addr0 = htole32(IWX_READ(sc, IWX_CSR_MAC_ADDR0_STRAP_B(base)));
+    mac_addr1 = htole32(IWX_READ(sc, IWX_CSR_MAC_ADDR1_STRAP_B(base)));
+    XYLog("MAC CSR base 0x%x strap %08x %08x\n", base, mac_addr0, mac_addr1);
     
     iwx_flip_hw_address(mac_addr0, mac_addr1, data->hw_addr);
     
@@ -4912,8 +4915,9 @@ iwx_set_mac_addr_from_csr(struct iwx_softc *sc, struct iwx_nvm_data *data)
     if (iwx_is_valid_mac_addr(data->hw_addr))
         goto done;
     
-    mac_addr0 = htole32(IWX_READ(sc, IWX_CSR_MAC_ADDR0_OTP));
-    mac_addr1 = htole32(IWX_READ(sc, IWX_CSR_MAC_ADDR1_OTP));
+    mac_addr0 = htole32(IWX_READ(sc, IWX_CSR_MAC_ADDR0_OTP_B(base)));
+    mac_addr1 = htole32(IWX_READ(sc, IWX_CSR_MAC_ADDR1_OTP_B(base)));
+    XYLog("MAC CSR otp %08x %08x\n", mac_addr0, mac_addr1);
     
     iwx_flip_hw_address(mac_addr0, mac_addr1, data->hw_addr);
     
