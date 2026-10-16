@@ -110,10 +110,16 @@
 
 #define BUILD_BUG_ON(condition) ((void)sizeof(char[1 - 2*!!(condition)]))
 
+/*
+ * kprintf only reaches a serial console; IOLog lands in the kernel message
+ * buffer and the unified log (`log show --predicate 'process == "kernel"'`),
+ * which is what we can actually read on a hackintosh. Emit both.
+ */
 #define XYLog(fmt, x...)\
 do\
 {\
 kprintf("%s: " fmt, "itlwm", ##x);\
+IOLog("%s: " fmt, "itlwm", ##x);\
 }while(0)
 
 typedef UInt8  u8;
