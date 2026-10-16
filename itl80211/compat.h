@@ -174,8 +174,15 @@ public:
 	IOPCIDevice*		dev;
 	void (*func)(void* arg);
 	void* arg;
+	int			msix;		/* 1 if IOPCIFamily granted MSI-X vectors for this device */
+	int			intr_index;	/* IOPCIDevice interrupt index to use with IOInterruptEventSource, -1 if unknown */
 };
 typedef pci_intr_handle* pci_intr_handle_t;
+
+/* IOPCIFamilyDefinitions.h (macOS 11+); MacKernelSDK only knows kIOInterruptTypePCIMessaged. */
+#ifndef kIOInterruptTypePCIMessagedX
+#define kIOInterruptTypePCIMessagedX 0x00020000
+#endif
 
 /*
  * Actions for ca_activate.

@@ -19,6 +19,7 @@
 //
 
 #include "compat.h"
+#include <linux/types.h>   /* XYLog */
 #include <sys/random.h>
 #include <sys/param.h>
 #include <sys/proc.h>
@@ -69,12 +70,43 @@ int pci_mapreg_map(const struct pci_attach_args *pa, int reg, pcireg_t type, int
 	return 0;
 }
 
+/*
+ * IOPCIDevice::configureInterrupts(interruptType, minVectors, maxVectors, options)
+ * exists in IOPCIFamily since macOS 11 but is absent from MacKernelSDK's IOPCIDevice.
+ * Bind the exported symbol directly (non-virtual call, `this` as first argument) and
+ * import it weakly so the kext still loads on older systems where it is missing.
+ */
+extern "C++" IOReturn IOPCIDevice_configureInterrupts(IOPCIDevice *dev, UInt32 interruptType,
+                                                      UInt32 minVectors, UInt32 maxVectors,
+                                                      IOOptionBits options)
+    __asm__("__ZN11IOPCIDevice19configureInterruptsEjjjj") __attribute__((weak_import));
+
+/* Find the first interrupt index whose type matches `typeMask`; -1 if none. */
+static int
+pci_intr_find_index(IOPCIDevice *dev, uint32_t typeMask)
+{
+    for (int index = 0; ; index++) {
+        int interruptType;
+        if (dev->getInterruptType(index, &interruptType) != kIOReturnSuccess)
+            break;
+        if ((uint32_t)interruptType & typeMask)
+            return index;
+    }
+    return -1;
+}
+
+/*
+ * Request true MSI-X vectors (needed by Bz/BE200, which cannot operate in MSI mode).
+ * Returns 0 and a handle with msix=1 when IOPCIFamily allocated an MSI-X vector,
+ * 1 otherwise (caller may fall back to pci_intr_map_msi).
+ */
 int
 pci_intr_map_msix(struct pci_attach_args *pa, int vec, pci_intr_handle_t *ihp)
 {
     pci_chipset_tag_t pc = pa->pa_pc;
     pcitag_t tag = pa->pa_tag;
     pcireg_t reg;
+    int index;
 
     KASSERT(PCI_MSIX_VEC(vec) == vec, "PCI_MSIX_VEC(vec) == vec");
 
@@ -83,23 +115,48 @@ pci_intr_map_msix(struct pci_attach_args *pa, int vec, pci_intr_handle_t *ihp)
 
     if (vec > PCI_MSIX_MC_TBLSZ(reg))
         return 1;
-    
-    return pci_intr_map_msi(pa, ihp);
+
+    if (&IOPCIDevice_configureInterrupts == NULL) {
+        XYLog("%s: IOPCIDevice::configureInterrupts unavailable, no MSI-X on this macOS\n", __FUNCTION__);
+        return 1;
+    }
+
+    /* One vector: all causes share it (Linux "shared vector" MSI-X mode). */
+    IOReturn ret = IOPCIDevice_configureInterrupts(tag, kIOInterruptTypePCIMessagedX, 1, vec + 1, 0);
+    if (ret != kIOReturnSuccess) {
+        XYLog("%s: configureInterrupts(MSI-X) failed: 0x%x\n", __FUNCTION__, ret);
+        return 1;
+    }
+
+    index = pci_intr_find_index(tag, kIOInterruptTypePCIMessagedX);
+    if (index < 0) {
+        XYLog("%s: MSI-X granted but no MSI-X interrupt index found\n", __FUNCTION__);
+        return 1;
+    }
+
+    if (pci_intr_map_msi(pa, ihp))
+        return 1;
+    (*ihp)->msix = 1;
+    (*ihp)->intr_index = index + vec;
+    XYLog("%s: MSI-X vector %d at interrupt index %d\n", __FUNCTION__, vec, (*ihp)->intr_index);
+    return 0;
 }
 
 int pci_intr_map_msi(struct pci_attach_args *paa, pci_intr_handle_t *ih) {
 	if (paa == 0 || ih == 0)
 		return 1;
-	
+
 	*ih = new pci_intr_handle();
-	
+
 	if (*ih == 0)
 		return 1;
-	
+
 	(*ih)->dev = paa->pa_tag;  // pci device reference
-	
+
 	(*ih)->workloop = paa->workloop;
-	
+	(*ih)->msix = 0;
+	(*ih)->intr_index = pci_intr_find_index(paa->pa_tag, kIOInterruptTypePCIMessaged);
+
 	return 0; // XXX not required on OS X
 }
 
