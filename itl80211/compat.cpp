@@ -103,7 +103,7 @@ pci_configure_msix(IOPCIDevice *dev, int nvec)
  * Appending is lock-protected and safe anywhere; publishing allocates and must
  * only run in thread context (itlwm_ring_flush).
  */
-#define ITLWM_RING_SIZE (32 * 1024)
+#define ITLWM_RING_SIZE (256 * 1024)
 static char gItlwmRing[ITLWM_RING_SIZE];
 static size_t gItlwmRingLen;
 static IOSimpleLock *gItlwmRingLock;
