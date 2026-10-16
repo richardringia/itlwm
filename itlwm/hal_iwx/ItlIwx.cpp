@@ -2089,8 +2089,7 @@ done:
         err = iwx_dma_contig_alloc(sc->sc_dmat, &sc->pnvm_desc,
                                    IWX_PNVM_MAX_SEGMENTS * sizeof(uint64_t), 0);
         if (err) {
-            XYLog("%s: could not allocate PNVM descriptor table
-", DEVNAME(sc));
+            XYLog("%s: could not allocate PNVM descriptor table\n", DEVNAME(sc));
             goto out;
         }
         descs = (uint64_t *)sc->pnvm_desc.vaddr;
@@ -2098,8 +2097,7 @@ done:
         for (int i = 0; i < nchunks; i++) {
             err = iwx_dma_contig_alloc(sc->sc_dmat, &sc->pnvm_seg[i], chunk_len[i], 0);
             if (err) {
-                XYLog("%s: could not allocate PNVM segment %d
-", DEVNAME(sc), i);
+                XYLog("%s: could not allocate PNVM segment %d\n", DEVNAME(sc), i);
                 iwx_pnvm_free_dram(sc);
                 goto out;
             }
@@ -2110,8 +2108,7 @@ done:
         }
         prph_sc_ctrl->pnvm_cfg.pnvm_base_addr = htole64(sc->pnvm_desc.paddr);
         prph_sc_ctrl->pnvm_cfg.pnvm_size = htole32(total);
-        XYLog("PNVM: fragmented, %d segments, %u bytes
-", nchunks, total);
+        XYLog("PNVM: fragmented, %d segments, %u bytes\n", nchunks, total);
         goto out;
     }
     err = iwx_dma_contig_alloc(sc->sc_dmat, &sc->pnvm_dram, size, 0);
