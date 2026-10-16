@@ -9935,6 +9935,7 @@ iwx_phy_ctxt_update(struct iwx_softc *sc, struct iwx_phy_ctxt *phyctxt,
 #define IWX_MLD_MAC_ID      0
 #define IWX_MLD_LINK_ID     0
 #define IWX_MLD_STA_MASK    (1U << IWX_STATION_ID)
+#define IWX_MLD_AID(a)      ((a) & 0x7ff)   /* mac80211 ieee80211_assoc_success() */
 
 int ItlIwx::
 iwx_mld_link_cmd(struct iwx_softc *sc, struct iwx_node *in, uint32_t action,
@@ -10053,12 +10054,17 @@ iwx_mld_mac_cmd(struct iwx_softc *sc, struct iwx_node *in, uint32_t action,
             cmd.nic_not_ack_enabled = htole32(1);
         }
         cmd.client.is_assoc = assoc ? 1 : 0;
-        cmd.client.assoc_id = htole16(assoc ? ni->ni_associd : 0);
+        /*
+         * net80211 keeps the two top bits of the AID field (0xc000); the
+         * firmware asserts on them (t12: SYSASSERT, data1 = 0xc008).
+         * Linux/mac80211 passes the bare AID.
+         */
+        cmd.client.assoc_id = htole16(assoc ? IWX_MLD_AID(ni->ni_associd) : 0);
     }
     err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_MAC_CONFIG_CMD, IWX_MAC_CONF_GROUP, 0),
                            0, sizeof(cmd), &cmd);
     XYLog("MLD MAC_CONFIG action=%u assoc=%d aid=%u he=%u -> %d\n",
-          action, assoc, assoc ? ni->ni_associd : 0, le16toh(cmd.he_support), err);
+          action, assoc, le16toh(cmd.client.assoc_id), le16toh(cmd.he_support), err);
     if (err)
         return err;
 
@@ -10100,7 +10106,7 @@ iwx_mld_sta_cmd(struct iwx_softc *sc, struct iwx_node *in)
     IEEE80211_ADDR_COPY(cmd.peer_link_address, in->in_macaddr);
     cmd.station_type = htole32(IWX_STATION_TYPE_PEER);
     if (ic->ic_state >= IEEE80211_S_ASSOC)
-        cmd.assoc_id = htole32(ni->ni_associd);
+        cmd.assoc_id = htole32(IWX_MLD_AID(ni->ni_associd));
     cmd.mfp = htole32((ni->ni_flags & IEEE80211_NODE_MFP) ? 1 : 0);
     if (iwx_mimo_enabled(sc) && ni->ni_rx_nss > 1)
         cmd.mimo = htole32(1);
