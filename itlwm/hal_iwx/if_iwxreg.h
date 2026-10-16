@@ -1414,6 +1414,7 @@ enum iwx_msix_ivar_for_cause {
 #define IWX_UCODE_TLV_CAPA_LAR_MULTI_MCC        29
 #define IWX_UCODE_TLV_CAPA_BT_COEX_RRC            30
 #define IWX_UCODE_TLV_CAPA_GSCAN_SUPPORT        31
+#define IWX_UCODE_TLV_CAPA_FRAGMENTED_PNVM_IMG  32  /* PNVM given as a table of DRAM segments */
 #define IWX_UCODE_TLV_CAPA_NAN_SUPPORT            34
 #define IWX_UCODE_TLV_CAPA_UMAC_UPLOAD            35
 #define IWX_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT        39

@@ -203,7 +203,7 @@ detach(IOPCIDevice *device)
     iwx_dma_contig_free(&sc->prph_info_dma);
     iwx_dma_contig_free(&sc->prph_scratch_dma);
     iwx_dma_contig_free(&sc->iml_dma);
-    iwx_dma_contig_free(&sc->pnvm_dram);
+    iwx_pnvm_free_dram(sc);
     iwx_dma_contig_free(&sc->fw_mon);
     if (sc->sc_dmat)
         sc->sc_dmat->reclaim();
@@ -1924,6 +1924,16 @@ struct iwx_pnvm_section {
     const uint8_t data[];
 } __packed;
 
+void ItlIwx::
+iwx_pnvm_free_dram(struct iwx_softc *sc)
+{
+    iwx_dma_contig_free(&sc->pnvm_dram);
+    for (int i = 0; i < sc->pnvm_nseg; i++)
+        iwx_dma_contig_free(&sc->pnvm_seg[i]);
+    sc->pnvm_nseg = 0;
+    iwx_dma_contig_free(&sc->pnvm_desc);
+}
+
 int ItlIwx::
 iwx_pnvm_handle_section(struct iwx_softc *sc, const uint8_t *data, size_t len)
 {
@@ -1935,6 +1945,8 @@ iwx_pnvm_handle_section(struct iwx_softc *sc, const uint8_t *data, size_t len)
     uint32_t size = 0;
     int err = 0;
     struct iwx_prph_scratch_ctrl_cfg *prph_sc_ctrl;
+    uint32_t chunk_off[IWX_PNVM_MAX_SEGMENTS], chunk_len[IWX_PNVM_MAX_SEGMENTS];
+    int nchunks = 0;
     
     XYLog("Handling PNVM section\n");
     
@@ -2020,6 +2032,11 @@ iwx_pnvm_handle_section(struct iwx_softc *sc, const uint8_t *data, size_t len)
                 pnvm_data = tmp;
                 
                 memcpy(pnvm_data + size, section->data, data_len);
+                if (nchunks < IWX_PNVM_MAX_SEGMENTS) {
+                    chunk_off[nchunks] = size;
+                    chunk_len[nchunks] = data_len;
+                    nchunks++;
+                }
                 
                 size += data_len;
                 
@@ -2060,7 +2077,43 @@ done:
     
     prph_sc_ctrl = &((struct iwx_prph_scratch *)sc->prph_scratch_dma.vaddr)->ctrl_cfg;
     
-    iwx_dma_contig_free(&sc->pnvm_dram);
+    iwx_pnvm_free_dram(sc);
+    if (isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_FRAGMENTED_PNVM_IMG)) {
+        /*
+         * Linux iwl_pcie_load_payloads_segments + iwl_pcie_set_pnvm_segments:
+         * every payload in its own DMA region; the firmware gets the address
+         * of a 64-entry table of those regions and the summed size.
+         */
+        uint64_t *descs;
+        uint32_t total = 0;
+        err = iwx_dma_contig_alloc(sc->sc_dmat, &sc->pnvm_desc,
+                                   IWX_PNVM_MAX_SEGMENTS * sizeof(uint64_t), 0);
+        if (err) {
+            XYLog("%s: could not allocate PNVM descriptor table
+", DEVNAME(sc));
+            goto out;
+        }
+        descs = (uint64_t *)sc->pnvm_desc.vaddr;
+        memset(descs, 0, IWX_PNVM_MAX_SEGMENTS * sizeof(uint64_t));
+        for (int i = 0; i < nchunks; i++) {
+            err = iwx_dma_contig_alloc(sc->sc_dmat, &sc->pnvm_seg[i], chunk_len[i], 0);
+            if (err) {
+                XYLog("%s: could not allocate PNVM segment %d
+", DEVNAME(sc), i);
+                iwx_pnvm_free_dram(sc);
+                goto out;
+            }
+            sc->pnvm_nseg = i + 1;
+            memcpy(sc->pnvm_seg[i].vaddr, pnvm_data + chunk_off[i], chunk_len[i]);
+            descs[i] = htole64(sc->pnvm_seg[i].paddr);
+            total += sc->pnvm_seg[i].size;
+        }
+        prph_sc_ctrl->pnvm_cfg.pnvm_base_addr = htole64(sc->pnvm_desc.paddr);
+        prph_sc_ctrl->pnvm_cfg.pnvm_size = htole32(total);
+        XYLog("PNVM: fragmented, %d segments, %u bytes
+", nchunks, total);
+        goto out;
+    }
     err = iwx_dma_contig_alloc(sc->sc_dmat, &sc->pnvm_dram, size, 0);
     if (err) {
         XYLog("%s: could not allocate context info DMA memory\n",
@@ -2206,6 +2259,8 @@ out:
     }
     
     err = iwx_wait_notification(sc, &sc->sc_init_complete, IWX_PNVM_COMPLETE, 2000);
+    XYLog("%s: PNVM_INIT_COMPLETE wait -> %d (fragmented capa %d)\n", __FUNCTION__, err,
+          isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_FRAGMENTED_PNVM_IMG) ? 1 : 0);
     if (err == ENXIO)
         return err;
     
@@ -3433,7 +3488,7 @@ iwx_stop_device(struct iwx_softc *sc)
     iwx_dma_contig_free(&sc->prph_info_dma);
     iwx_dma_contig_free(&sc->prph_scratch_dma);
     iwx_dma_contig_free(&sc->iml_dma);
-    iwx_dma_contig_free(&sc->pnvm_dram);
+    iwx_pnvm_free_dram(sc);
 #ifdef AIRPORT_VTD
     sc->sc_dmat->reclaim();
 #endif

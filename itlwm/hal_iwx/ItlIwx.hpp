@@ -222,6 +222,7 @@ public:
     int    iwx_read_firmware(struct iwx_softc *);
     int    iwx_read_pnvm(struct iwx_softc *);
     int     iwx_load_pnvm(struct iwx_softc *);
+    void    iwx_pnvm_free_dram(struct iwx_softc *);
     int     iwx_pnvm_handle_section(struct iwx_softc *, const uint8_t *, size_t);
     uint32_t iwx_read_prph_unlocked(struct iwx_softc *, uint32_t);
     uint32_t iwx_read_prph(struct iwx_softc *, uint32_t);

@@ -663,6 +663,11 @@ struct iwx_softc {
     struct iwx_dma_info prph_info_dma;
     struct iwx_dma_info iml_dma;
     struct iwx_dma_info pnvm_dram;
+    /* Fragmented PNVM (fw capa FRAGMENTED_PNVM_IMG, Bz): one DMA region per payload + address table */
+#define IWX_PNVM_MAX_SEGMENTS 64   /* Linux IPC_DRAM_MAP_ENTRY_NUM_MAX */
+    struct iwx_dma_info pnvm_seg[IWX_PNVM_MAX_SEGMENTS];
+    int pnvm_nseg;
+    struct iwx_dma_info pnvm_desc;
 
 	int sc_fw_chunk_done;
 	int sc_init_complete;
