@@ -481,6 +481,7 @@ public:
     static int    iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count);
     static int    iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count);
     static int    iwx_match(IOPCIDevice *);
+    static int    iwx_needs_msix(IOPCIDevice *);   /* Bz/Gl family: MSI-X only */
     int    iwx_preinit(struct iwx_softc *);
     void    iwx_attach_hook(struct device *);
     bool    iwx_attach(struct iwx_softc *, struct pci_attach_args *);

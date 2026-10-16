@@ -278,11 +278,13 @@ bool AirportItlwm::start(IOService *provider)
     setProperty("DriverKitDriver", kOSBooleanFalse);
 #ifdef AIRPORT_WCL
     if (!initCCLogs()) {
+        XYLog("%s: initCCLogs failed\n", __FUNCTION__);
         releaseAll();
         return false;
     }
 #endif
     if (!super::start(provider)) {
+        XYLog("%s: super::start (IO80211Controller) failed\n", __FUNCTION__);
 #ifdef AIRPORT_WCL
         releaseAll();
 #endif
@@ -294,10 +296,12 @@ bool AirportItlwm::start(IOService *provider)
     pciNub->configWrite8(0x41, 0);
     if (pciNub->requestPowerDomainState(kIOPMPowerOn,
                                         (IOPowerConnection *) getParentEntry(gIOPowerPlane), IOPMLowestState) != IOPMNoErr) {
+        XYLog("%s: requestPowerDomainState failed\n", __FUNCTION__);
         super::stop(provider);
         return false;
     }
     if (initPCIPowerManagment(pciNub) == false) {
+        XYLog("%s: initPCIPowerManagment failed\n", __FUNCTION__);
         super::stop(pciNub);
         return false;
     }

@@ -68,6 +68,8 @@ probe(IOService *provider, SInt32 *score)
     IOPCIDevice* device = OSDynamicCast(IOPCIDevice, provider);
     if (!device)
         return NULL;
+    XYLog("%s candidate %04x:%04x\n", __FUNCTION__,
+          device->configRead16(kIOPCIConfigVendorID), device->configRead16(kIOPCIConfigDeviceID));
     if (ItlIwx::iwx_match(device)) {
         isMatch = true;
         fHalService = new ItlIwx;
@@ -81,7 +83,27 @@ probe(IOService *provider, SInt32 *score)
         fHalService = new ItlIwn;
     }
     if (isMatch) {
-        XYLog("%s Found\n", __FUNCTION__);
+        XYLog("%s Found %04x:%04x\n", __FUNCTION__,
+              device->configRead16(kIOPCIConfigVendorID), device->configRead16(kIOPCIConfigDeviceID));
+        /*
+         * Bz/Gl (BE200) only works with MSI-X. IOPCIFamily refuses to change the
+         * interrupt mode once vectors are resolved (PM setup, getInterruptType, ...),
+         * so request MSI-X here, the earliest point, and leave the capability
+         * registers to IOPCIFamily instead of forcing MSI on below.
+         */
+        if (ItlIwx::iwx_needs_msix(device)) {
+            device->findPCICapability(PCI_CAP_ID_MSIX, &msixCap);
+            if (!msixCap) {
+                XYLog("%s Bz device without MSI-X capability\n", __FUNCTION__);
+                fHalService->release();
+                fHalService = NULL;
+                return NULL;
+            }
+            if (pci_configure_msix(device, 1))
+                XYLog("%s WARNING: early MSI-X request failed, attach will retry\n", __FUNCTION__);
+            this->pciNub = device;
+            return this;
+        }
         device->findPCICapability(PCI_CAP_ID_MSIX, &msixCap);
         if (msixCap)
             pciMsiXClearAndSet(device, msixCap, PCI_MSIX_FLAGS_ENABLE, 0);
@@ -106,6 +128,7 @@ start(IOService *provider)
     XYLog("%s\n", __PRETTY_FUNCTION__);
     _fWorkloop = IO80211WorkQueue::workQueue();
     if (!super::start(provider)) {
+        XYLog("%s: super::start failed\n", __FUNCTION__);
         return false;
     }
     IOLog("%s::super start succeed\n", getName());

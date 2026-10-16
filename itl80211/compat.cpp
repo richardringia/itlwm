@@ -81,6 +81,18 @@ extern "C++" IOReturn IOPCIDevice_configureInterrupts(IOPCIDevice *dev, UInt32 i
                                                       IOOptionBits options)
     __asm__("__ZN11IOPCIDevice19configureInterruptsEjjjj") __attribute__((weak_import));
 
+int
+pci_configure_msix(IOPCIDevice *dev, int nvec)
+{
+    if (&IOPCIDevice_configureInterrupts == NULL) {
+        XYLog("%s: IOPCIDevice::configureInterrupts unavailable, no MSI-X on this macOS\n", __FUNCTION__);
+        return 1;
+    }
+    IOReturn ret = IOPCIDevice_configureInterrupts(dev, kIOInterruptTypePCIMessagedX, 1, nvec, 0);
+    XYLog("%s: configureInterrupts(MSI-X, 1..%d) -> 0x%x\n", __FUNCTION__, nvec, ret);
+    return ret == kIOReturnSuccess ? 0 : 1;
+}
+
 /* Find the first interrupt index whose type matches `typeMask`; -1 if none. */
 static int
 pci_intr_find_index(IOPCIDevice *dev, uint32_t typeMask)
@@ -116,17 +128,10 @@ pci_intr_map_msix(struct pci_attach_args *pa, int vec, pci_intr_handle_t *ihp)
     if (vec > PCI_MSIX_MC_TBLSZ(reg))
         return 1;
 
-    if (&IOPCIDevice_configureInterrupts == NULL) {
-        XYLog("%s: IOPCIDevice::configureInterrupts unavailable, no MSI-X on this macOS\n", __FUNCTION__);
+    /* One vector: all causes share it (Linux "shared vector" MSI-X mode).
+     * Idempotent on macOS 26: succeeds if the device already has this allocation. */
+    if (pci_configure_msix(tag, vec + 1))
         return 1;
-    }
-
-    /* One vector: all causes share it (Linux "shared vector" MSI-X mode). */
-    IOReturn ret = IOPCIDevice_configureInterrupts(tag, kIOInterruptTypePCIMessagedX, 1, vec + 1, 0);
-    if (ret != kIOReturnSuccess) {
-        XYLog("%s: configureInterrupts(MSI-X) failed: 0x%x\n", __FUNCTION__, ret);
-        return 1;
-    }
 
     index = pci_intr_find_index(tag, kIOInterruptTypePCIMessagedX);
     if (index < 0) {

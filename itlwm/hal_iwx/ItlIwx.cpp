@@ -13452,6 +13452,19 @@ iwx_match(IOPCIDevice *device)
                          nitems(iwx_devices));
 }
 
+/* True if the device's transport config is Bz-family (BE200/BE202), which needs MSI-X. */
+int ItlIwx::
+iwx_needs_msix(IOPCIDevice *device)
+{
+    int devId = device->configRead16(kIOPCIConfigDeviceID);
+    for (int i = 0; i < (int)nitems(iwx_devices); i++) {
+        if (iwx_devices[i].pm_pid == devId && iwx_devices[i].drv_data)
+            return ((const struct iwl_cfg_trans_params *)iwx_devices[i].drv_data)->device_family
+                >= IWX_DEVICE_FAMILY_BZ;
+    }
+    return 0;
+}
+
 int ItlIwx::
 iwx_preinit(struct iwx_softc *sc)
 {
