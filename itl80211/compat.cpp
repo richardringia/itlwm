@@ -123,13 +123,21 @@ itlwm_ring_lock(void)
 extern "C" void
 itlwm_ring_log(const char *fmt, ...)
 {
-    char line[320];
+    char line[340];
     va_list ap;
+    clock_sec_t secs;
+    clock_usec_t usecs;
+    /* wall-clock (UTC epoch) stamp so the ring lines up with log show / pmset */
+    clock_get_calendar_microtime(&secs, &usecs);
+    int h = snprintf(line, sizeof(line), "[%lu.%03u] ", (unsigned long)secs, (unsigned)(usecs / 1000));
+    if (h < 0 || (size_t)h >= sizeof(line))
+        h = 0;
     va_start(ap, fmt);
-    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    int n = vsnprintf(line + h, sizeof(line) - h, fmt, ap);
     va_end(ap);
     if (n <= 0)
         return;
+    n += h;
     if ((size_t)n >= sizeof(line))
         n = sizeof(line) - 1;
     IOSimpleLock *lk = itlwm_ring_lock();

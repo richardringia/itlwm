@@ -3437,6 +3437,7 @@ iwx_stop_device(struct iwx_softc *sc)
     XYLog("%s\n", __FUNCTION__);
     int qid;
     
+    sc->sc_uc.uc_ok = 0;    /* firmware is gone: iwx_send_cmd() refuses from here */
     iwx_disable_interrupts(sc);
     sc->sc_flags &= ~IWX_FLAG_USE_ICT;
     
@@ -6796,6 +6797,14 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     if (dmaDetaching)
         return ENXIO;
 #endif
+    /*
+     * No firmware, no commands: a task that slept through iwx_stop() (e.g.
+     * a deauth when Wi-Fi is switched off) would otherwise queue commands
+     * into the reset ring, and the next firmware boot executes them
+     * (t16: SYSASSERT 0x201000B4 on a stale SCD_QUEUE_CONFIG remove).
+     */
+    if (!sc->sc_uc.uc_ok)
+        return ENXIO;
     if ((sc->sc_flags & (IWX_FLAG_SHUTDOWN | IWX_FLAG_HW_ERR)) ||
         ring->ring_count == 0)
         return ENXIO;
@@ -8682,12 +8691,19 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
     uint16_t gen_flags = 0;
     struct iwx_scan_general_params_v10 *general_params;
     struct iwx_scan_channel_params_v6 *cp;
-    const uint32_t timeout = bgscan ?  htole32(120) : htole32(0);
 #ifdef AIRPORT_WCL
     const auto timing = AirportWCL::scanTiming(ic->ic_wcl_scan_away_time_ms, bgscan,
         isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_FRAGMENTED_SCAN));
     const uint32_t maxOut = htole32(timing.maxOutTU);
+    /*
+     * Home time between off-channel periods, Linux scan_timing[]: WILD 30,
+     * FRAGMENTED 95. A flat 120 made fragmented 5 GHz background scans
+     * (3 x 44 TU per 110 TU passive channel) take ~23 s, past WCL's 20 s
+     * scan timeout (BE200 t16).
+     */
+    const uint32_t timeout = bgscan ? htole32(timing.fragmented ? 95 : 30) : htole32(0);
 #else
+    const uint32_t timeout = bgscan ?  htole32(120) : htole32(0);
     const uint32_t maxOut = timeout;
 #endif
     struct iwx_host_cmd hcmd = {
@@ -8746,7 +8762,9 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
     general_params->suspend_time[IWX_SCAN_LB_LMAC_IDX] =
         timeout;
     
-    if (isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_CDB_SUPPORT)) {
+    /* Linux iwl_mvm_scan_umac_dwell_v11 always fills the HB LMAC too */
+    if (isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_CDB_SUPPORT) ||
+        sc->sc_device_family >= IWX_DEVICE_FAMILY_BZ) {
         general_params->max_out_of_time[IWX_SCAN_HB_LMAC_IDX] = maxOut;
         general_params->suspend_time[IWX_SCAN_HB_LMAC_IDX] = timeout;
     }
@@ -8776,8 +8794,9 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
     cp->count = iwx_umac_scan_fill_channels(sc,
                                             (struct iwx_scan_channel_cfg_umac *)cp->channel_config,
                                             scanActive, bgscan);
-    XYLog("%s: ver %d, %d channels, active=%d bgscan=%d flags=0x%x\n", __FUNCTION__,
-          iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_SCAN_REQ_UMAC), cp->count, scanActive, bgscan, gen_flags);
+    XYLog("%s: ver %d, %d channels, active=%d bgscan=%d flags=0x%x maxout=%u suspend=%u\n", __FUNCTION__,
+          iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_SCAN_REQ_UMAC), cp->count, scanActive, bgscan, gen_flags,
+          le32toh(maxOut), le32toh(timeout));
     clock_get_uptime(&sc->sc_scan_start_abs);
     cp->n_aps_override[0] = IWX_SCAN_ADWELL_N_APS_GO_FRIENDLY;
     cp->n_aps_override[1] = IWX_SCAN_ADWELL_N_APS_SOCIAL_CHS;

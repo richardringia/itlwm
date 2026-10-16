@@ -449,6 +449,9 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
     bool enterprise = auth == AirportWCL::LegacyAuth::Enterprise;
     bool supported = auth != AirportWCL::LegacyAuth::Invalid;
     ieee80211com *ic = fHalService->get80211Controller();
+    XYLog("WCL join req: ssidlen=%u bssid=%02x:%02x:%02x:%02x:%02x:%02x auth=%d state=%d joinPending=%d scanPending=%d macReconfig=%d\n",
+          join.ssidLength, join.bssid[0], join.bssid[1], join.bssid[2], join.bssid[3], join.bssid[4], join.bssid[5],
+          (int)auth, ic->ic_state, joinPending, scanPending, ic->ic_wcl_mac_reconfig);
     // Applying a private MAC restarts firmware asynchronously. WCL can issue
     // the association before that restart has completed; keep one request
     // until the HAL reports READY rather than making the user retry it.
@@ -577,6 +580,7 @@ void AirportItlwmSkywalkInterface::finishWCLJoin(uint16_t status, uint16_t reaso
 {
     if (!joinPending)
         return;
+    XYLog("WCL join finish: status=%u reason=%u drv=0x%x\n", status, reason, driverStatus);
     AirportWCL::ConnectionEvent event = {};
     event.status = status;
     event.reason = reason;
@@ -602,6 +606,7 @@ void AirportItlwmSkywalkInterface::wclJoinTimeout(OSObject *owner, IOTimerEventS
 {
     auto self = OSDynamicCast(AirportItlwmSkywalkInterface, owner);
     if (self && !self->wclStopping) {
+        XYLog("WCL join TIMEOUT (30 s)\n");
         self->finishWCLJoin(1, 1004, kIOReturnTimeout);
         self->leaveWCLNetwork();
     }
@@ -610,6 +615,7 @@ void AirportItlwmSkywalkInterface::wclJoinTimeout(OSObject *owner, IOTimerEventS
 IOReturn AirportItlwmSkywalkInterface::leaveWCLNetwork()
 {
     ieee80211com *ic = fHalService->get80211Controller();
+    XYLog("WCL leave network (state=%d)\n", ic->ic_state);
     portAuthorized = false;
     updateWCLLinkQuality(true);
     joinPending = false;
@@ -689,6 +695,8 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
         case IEEE80211_EVT_DRIVER_READY:
         case IEEE80211_EVT_DRIVER_STOPPED: {
             bool ready = code == IEEE80211_EVT_DRIVER_READY;
+            XYLog("WCL driver %s (macReconfig=%d joinPending=%d)\n", ready ? "READY" : "STOPPED",
+                  ic->ic_wcl_mac_reconfig, joinPending);
             if (!ready) {
                 finishWCLScan(ic->ic_wcl_mac_reconfig ? kIOReturnAborted : kIOReturnOffline);
                 finishWCLJoin(1, 0, kIOReturnOffline);

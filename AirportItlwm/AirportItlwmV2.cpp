@@ -855,6 +855,10 @@ IOReturn AirportItlwm::getHardwareAddress(IOEthernetAddress *addrP)
 
 IOReturn AirportItlwm::setHardwareAddress(const void *addrP, UInt32 addrBytes)
 {
+    if (addrP && addrBytes >= 6) {
+        const uint8_t *a = (const uint8_t *)addrP;
+        XYLog("setHardwareAddress %02x:%02x:%02x:%02x:%02x:%02x\n", a[0], a[1], a[2], a[3], a[4], a[5]);
+    }
     if (!fNetIf || !addrP)
         return kIOReturnError;
 #ifdef AIRPORT_WCL
