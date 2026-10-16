@@ -1391,6 +1391,7 @@ void AirportItlwm::setPowerStateOff()
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOff;
     disableAdapter(bsdInterface);
+    itlwm_ring_flush();   /* watchdog is stopped from here: publish pre-sleep lines now */
     pmPolicyMaker->acknowledgeSetPowerState();
 }
 
@@ -1398,5 +1399,6 @@ void AirportItlwm::setPowerStateOn()
 {
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOn;
+    itlwm_ring_flush();
     pmPolicyMaker->acknowledgeSetPowerState();
 }
