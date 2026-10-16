@@ -13588,6 +13588,23 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         return false;
     }
     /*
+     * Resolve the transport config from the PCI ID now: the interrupt mode
+     * depends on the device family (the full match incl. HW_REV/RF_ID happens
+     * below, once the BAR is mapped and registers can be read).
+     */
+    {
+        uint16_t early_dev = sc->sc_pcitag->configRead16(kIOPCIConfigDeviceID);
+        uint16_t early_subdev = sc->sc_pcitag->configRead16(kIOPCIConfigSubSystemID);
+        uint16_t early_subven = sc->sc_pcitag->configRead16(kIOPCIConfigSubSystemVendorID);
+        pci_match(PCI_VENDOR_INTEL, early_dev, early_subven, early_subdev, iwx_devices,
+                  nitems(iwx_devices), (void **)&sc->sc_cfg_params);
+        if (sc->sc_cfg_params)
+            sc->sc_device_family = sc->sc_cfg_params->device_family;
+        XYLog("%s: PCI %04x:%04x subsys %04x:%04x family %d\n", DEVNAME(sc), PCI_VENDOR_INTEL,
+              early_dev, early_subven, early_subdev, sc->sc_device_family);
+    }
+
+    /*
      * Bz/Gl (BE200) cannot operate in MSI mode (Linux iwlwifi only enables it
      * via MSI-X), so request real MSI-X vectors for that family and fall back
      * to MSI everywhere else, as before.
@@ -13665,6 +13682,20 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
     sc->sc_hw_rev = (sc->sc_hw_rev & 0xfff0) |
     (IWX_CSR_HW_REV_STEP(sc->sc_hw_rev << 2) << 2);
     sc->sc_hw_rf_id = IWX_READ(sc, IWX_CSR_HW_RF_ID);
+    XYLog("%s: CSR_HW_REV 0x%08x (type 0x%x step %d) CSR_HW_RF_ID 0x%08x (type 0x%x)\n",
+          DEVNAME(sc), sc->sc_hw_rev, CSR_HW_REV_TYPE(sc->sc_hw_rev),
+          IWX_CSR_HW_REV_STEP(sc->sc_hw_rev), sc->sc_hw_rf_id, CSR_HW_RFID_TYPE(sc->sc_hw_rf_id));
+    /*
+     * Bz/Gl parts frequently report CSR_HW_RF_ID == 0; Linux then derives the
+     * RF type from the CRF ID register (iwl_pcie_map_crf_id). BE200/BE202 only
+     * ship with the FM radio, so assume it here rather than fail to match.
+     */
+    if (sc->sc_hw_rf_id == 0 &&
+        (CSR_HW_REV_TYPE(sc->sc_hw_rev) == IWL_CFG_MAC_TYPE_GL ||
+         CSR_HW_REV_TYPE(sc->sc_hw_rev) == IWL_CFG_MAC_TYPE_BZ)) {
+        sc->sc_hw_rf_id = IWL_CFG_RF_TYPE_FM << 12;
+        XYLog("%s: RF ID is 0 on a Bz/Gl MAC, assuming FM (0x%08x)\n", DEVNAME(sc), sc->sc_hw_rf_id);
+    }
     uint16_t device = sc->sc_pcitag->configRead16(kIOPCIConfigDeviceID);
     uint16_t subsystem_device = sc->sc_pcitag->configRead16(kIOPCIConfigSubSystemID);
     uint16_t subsystem_vendor = sc->sc_pcitag->configRead16(kIOPCIConfigSubSystemVendorID);
