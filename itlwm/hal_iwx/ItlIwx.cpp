@@ -8697,6 +8697,9 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
     cp->count = iwx_umac_scan_fill_channels(sc,
                                             (struct iwx_scan_channel_cfg_umac *)cp->channel_config,
                                             scanActive, bgscan);
+    XYLog("%s: ver %d, %d channels, active=%d bgscan=%d flags=0x%x\n", __FUNCTION__,
+          iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_SCAN_REQ_UMAC), cp->count, scanActive, bgscan, gen_flags);
+    clock_get_uptime(&sc->sc_scan_start_abs);
     cp->n_aps_override[0] = IWX_SCAN_ADWELL_N_APS_GO_FRIENDLY;
     cp->n_aps_override[1] = IWX_SCAN_ADWELL_N_APS_SOCIAL_CHS;
     
@@ -10499,6 +10502,15 @@ iwx_endscan(struct iwx_softc *sc)
         return;
     
     sc->sc_flags &= ~(IWX_FLAG_SCANNING | IWX_FLAG_BGSCAN);
+    {
+        int nnodes = 0;
+        uint64_t now;
+        RB_FOREACH(ni, ieee80211_tree, &ic->ic_tree)
+            nnodes++;
+        clock_get_uptime(&now);
+        absolutetime_to_nanoseconds(now - sc->sc_scan_start_abs, &now);
+        XYLog("endscan: %d nodes, scan took %llu ms\n", nnodes, now / 1000000ULL);
+    }
     ieee80211_end_scan(&ic->ic_if);
 }
 
@@ -11870,6 +11882,9 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             case IWX_SCAN_COMPLETE_UMAC: {
                 struct iwx_umac_scan_complete *notif;
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_umac_scan_complete *);
+                XYLog("SCAN_COMPLETE uid=%u status=%u ebs=%u last_iter=%u time_from_last_iter=%u\n",
+                      le32toh(notif->uid), notif->status, notif->ebs_status,
+                      notif->last_iter, le32toh(notif->time_from_last_iter));
                 iwx_endscan(sc);
                 break;
             }
@@ -11877,6 +11892,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             case IWX_SCAN_ITERATION_COMPLETE_UMAC: {
                 struct iwx_umac_scan_iter_complete_notif *notif;
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_umac_scan_iter_complete_notif *);
+                XYLog("SCAN_ITER_COMPLETE status=%u scanned_channels=%u last_channel=%u\n",
+                      notif->status, notif->scanned_channels, notif->last_channel);
                 iwx_endscan(sc);
                 break;
             }

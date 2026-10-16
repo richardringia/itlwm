@@ -687,6 +687,7 @@ struct iwx_softc {
 #define IWX_MAX_FW_CMD_VERSIONS	800
 	struct iwx_fw_cmd_version cmd_versions[IWX_MAX_FW_CMD_VERSIONS];
 	int n_cmd_versions;
+	uint64_t sc_scan_start_abs;	/* BE200 bring-up: scan duration logging */
     char sc_fw_mcc[3];
     uint16_t sc_fw_mcc_int;
 #define IWX_IML_MAX_LEN 2048*10
