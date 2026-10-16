@@ -447,6 +447,8 @@ private:
     IOTimerEventSource *joinTimer;
     uint8_t joinBSSID[6];
     bool scanPending;
+    uint32_t wclDbgPublished;   /* BE200 bring-up: scan result diagnostics */
+    uint32_t wclDbgRejected;
     bool scanCompleted;
     bool scanSkipCompletion;
     bool wclBssValid;
